@@ -1,5 +1,5 @@
 export const config = {
-  isDemoMode: process.env.DEMO_MODE === "true" || !process.env.AI_API_KEY,
+  isDemoMode: process.env.DEMO_MODE === "true",
   supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
   supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
