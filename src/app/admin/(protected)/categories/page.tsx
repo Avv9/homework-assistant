@@ -13,7 +13,14 @@ export default function CategoriesPage() {
   const [items, setItems] = useState<Category[]>([]);
   const [editing, setEditing] = useState<Partial<Omit<Category, "slug">> & { slug?: string } | null>(null);
 
-  const load = () => fetch("/api/admin/categories").then((r) => r.json()).then(setItems);
+  const load = () =>
+    fetch("/api/admin/categories")
+      .then((r) => r.json())
+      .then((data) => {
+        // 🔥 الحل هنا
+        setItems(Array.isArray(data) ? data : data.items ?? []);
+      });
+
   useEffect(() => {
     load();
   }, []);
@@ -91,14 +98,20 @@ export default function CategoriesPage() {
       )}
 
       <div className="space-y-2">
-        {items.map((item) => (
+        {/* 🔥 هنا التصحيح */}
+        {(Array.isArray(items) ? items : []).map((item) => (
           <Card key={item.id} className="flex flex-row items-center justify-between p-4">
             <div>
               <p className="font-medium">{locale === "ar" ? item.nameAr : item.nameEn}</p>
               <p className="text-xs text-muted-foreground">{item.slug}</p>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="ghost" size="icon" onClick={() => toggleActive(item)} title={item.isActive ? t("common.active") : t("common.hidden")}>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => toggleActive(item)}
+                title={item.isActive ? t("common.active") : t("common.hidden")}
+              >
                 {item.isActive ? <Eye size={16} /> : <EyeOff size={16} />}
               </Button>
               <Button variant="ghost" size="icon" onClick={() => setEditing(item)}>

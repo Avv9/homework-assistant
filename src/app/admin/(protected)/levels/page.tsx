@@ -15,10 +15,22 @@ export default function LevelsPage() {
   const [editing, setEditing] = useState<Partial<Level> | null>(null);
 
   const load = () => {
-    fetch("/api/admin/levels").then((r) => r.json()).then(setItems);
-    fetch("/api/admin/specializations").then((r) => r.json()).then(setSpecs);
+    fetch("/api/admin/levels")
+      .then((r) => r.json())
+      .then((data) => {
+        setItems(Array.isArray(data) ? data : data.items ?? []);
+      });
+
+    fetch("/api/admin/specializations")
+      .then((r) => r.json())
+      .then((data) => {
+        setSpecs(Array.isArray(data) ? data : data.items ?? []);
+      });
   };
-  useEffect(load, []);
+
+  useEffect(() => {
+    load();
+  }, []);
 
   const save = async () => {
     if (!editing) return;
@@ -62,7 +74,7 @@ export default function LevelsPage() {
               value={editing.specializationId ?? ""}
               onChange={(e) => setEditing({ ...editing, specializationId: e.target.value })}
             >
-              {specs.map((s) => (
+              {(Array.isArray(specs) ? specs : []).map((s) => (
                 <option key={s.id} value={s.id}>
                   {locale === "ar" ? s.nameAr : s.nameEn}
                 </option>
@@ -79,7 +91,7 @@ export default function LevelsPage() {
       )}
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        {items.map((item) => (
+        {(Array.isArray(items) ? items : []).map((item) => (
           <Card key={item.id} className="flex flex-row items-center justify-between p-4">
             <p className="font-medium">{locale === "ar" ? item.nameAr : item.nameEn}</p>
             <Button variant="ghost" size="icon" onClick={() => remove(item.id)}>
