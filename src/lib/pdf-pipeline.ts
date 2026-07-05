@@ -11,6 +11,13 @@ export interface ProcessedPair {
   confidence: number;
 }
 
+type ParsedQuestionBlock = {
+  questionNumber: number;
+  questionText: string;
+  options: Record<string, string>;
+  pageNumber: number;
+};
+
 export function isPdfBuffer(buf: Buffer): boolean {
   return buf.length > 4 && buf.slice(0, 4).toString("binary") === "%PDF";
 }
@@ -19,13 +26,164 @@ async function extractTextFromBuffer(
   buf: Buffer,
 ): Promise<{ text: string; pageCount: number }> {
   try {
+    // pdf-parse v2 API
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pdfParse = require("pdf-parse");
-    const result = await pdfParse(buf, { max: config.maxPdfPages });
-    return { text: result.text ?? "", pageCount: result.numpages ?? 1 };
-  } catch {
+    const { PDFParse } = require("pdf-parse");
+
+    const parser = new PDFParse({ data: buf });
+    const result = await parser.getText({ first: config.maxPdfPages });
+
+    const text =
+      typeof result?.text === "string"
+        ? result.text
+        : Array.isArray(result?.pages)
+          ? result.pages
+              .map((p: { text?: string }) => p?.text ?? "")
+              .join("\n")
+          : "";
+
+    const pageCount =
+      typeof result?.total === "number"
+        ? result.total
+        : Array.isArray(result?.pages)
+          ? result.pages.length
+          : 1;
+
+    if (typeof parser.destroy === "function") {
+      await parser.destroy();
+    }
+
+    return { text, pageCount };
+  } catch (error) {
+    console.error("PDF extract failed:", error);
     return { text: "", pageCount: 0 };
   }
+}
+
+function extractAnswerKey(text: string): Map<number, string> {
+  const map = new Map<number, string>();
+
+  // غالبًا مفتاح الإجابات يكون آخر الملف
+  const tail = text.slice(Math.max(0, text.length - 3000)).toUpperCase();
+
+  const regex = /\b(\d{1,3})\s+([A-D])\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(tail)) !== null) {
+    const num = Number(match[1]);
+    const letter = match[2];
+    if (!Number.isNaN(num)) {
+      map.set(num, letter);
+    }
+  }
+
+  return map;
+}
+
+function parseQuestionBlocks(text: string): ParsedQuestionBlock[] {
+  const cleaned = text
+    .replace(/\r/g, "")
+    .replace(/MODULE\s+\d+/gi, "")
+    .trim();
+
+  const lines = cleaned
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const blocks: ParsedQuestionBlock[] = [];
+  const qPattern = /^(\d{1,3})[.)]\s+(.*)$/;
+  const optionPattern = /^([a-d])[.)]\s+(.*)$/i;
+
+  let current:
+    | {
+        questionNumber: number;
+        questionParts: string[];
+        options: Record<string, string>;
+        pageNumber: number;
+      }
+    | null = null;
+
+  for (const line of lines) {
+    const qMatch = line.match(qPattern);
+
+    if (qMatch) {
+      if (current) {
+        blocks.push({
+          questionNumber: current.questionNumber,
+          questionText: current.questionParts.join(" ").trim(),
+          options: current.options,
+          pageNumber: current.pageNumber,
+        });
+      }
+
+      current = {
+        questionNumber: Number(qMatch[1]),
+        questionParts: [qMatch[2].trim()],
+        options: {},
+        pageNumber: 1,
+      };
+      continue;
+    }
+
+    if (!current) continue;
+
+    const optionMatch = line.match(optionPattern);
+    if (optionMatch) {
+      current.options[optionMatch[1].toUpperCase()] = optionMatch[2].trim();
+      continue;
+    }
+
+    // تجاهل سطور answer key المجمعة في نهاية الملف
+    if (/^(?:\d+\s+[A-D]\s*){2,}$/i.test(line)) {
+      continue;
+    }
+
+    current.questionParts.push(line);
+  }
+
+  if (current) {
+    blocks.push({
+      questionNumber: current.questionNumber,
+      questionText: current.questionParts.join(" ").trim(),
+      options: current.options,
+      pageNumber: current.pageNumber,
+    });
+  }
+
+  return blocks;
+}
+
+function splitFallback(text: string): ProcessedPair[] {
+  const answerKey = extractAnswerKey(text);
+  const blocks = parseQuestionBlocks(text);
+
+  if (blocks.length > 0) {
+    return blocks.map((block) => {
+      const answerLetter = answerKey.get(block.questionNumber);
+      const answerText = answerLetter
+        ? block.options[answerLetter] ?? answerLetter
+        : "";
+
+      return {
+        questionNumber: block.questionNumber,
+        questionText: block.questionText,
+        answerText,
+        pageNumber: block.pageNumber,
+        confidence: answerText ? 0.82 : 0.62,
+      };
+    });
+  }
+
+  return [
+    {
+      questionNumber: 1,
+      questionText: text.slice(0, 500).trim(),
+      answerText: "",
+      pageNumber: 1,
+      confidence: 0.3,
+    },
+  ];
 }
 
 async function splitWithAI(
@@ -53,8 +211,8 @@ Each element must have:
   "confidence": number
 }
 
-If the text contains both questions and answers (a solution file), extract every pair.
-If only questions, set answerText to "".
+If the file is a test bank with answer key letters at the end, map each question to its correct answer choice text.
+If only questions exist and no answer can be inferred, set answerText to "".
 Respond in ${lang} for text fields when applicable.
 
 Return only valid JSON array.`;
@@ -146,71 +304,6 @@ Include question numbers, question text, and answers exactly as written.`,
   } catch {
     return "";
   }
-}
-
-function splitFallback(text: string): ProcessedPair[] {
-  const lines = text
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  const pairs: ProcessedPair[] = [];
-  const qPattern = /^(?:Q\.?\s*|السؤال\s*|Question\s*)?(\d+)[.):\s]/i;
-
-  let currentQ = "";
-  let currentA = "";
-  let qNum = 0;
-  let inAnswer = false;
-
-  for (const line of lines) {
-    const m = line.match(qPattern);
-
-    if (m) {
-      if (currentQ) {
-        pairs.push({
-          questionNumber: qNum,
-          questionText: currentQ.trim(),
-          answerText: currentA.trim(),
-          pageNumber: 1,
-          confidence: 0.6,
-        });
-      }
-
-      qNum = parseInt(m[1]);
-      currentQ = line.replace(qPattern, "").trim();
-      currentA = "";
-      inAnswer = false;
-    } else if (/^(?:answer|الإجابة|الجواب|Solution)[:\s]/i.test(line)) {
-      inAnswer = true;
-      currentA += " " + line.replace(/^[^:]+:\s*/i, "");
-    } else if (inAnswer) {
-      currentA += " " + line;
-    } else {
-      currentQ += " " + line;
-    }
-  }
-
-  if (currentQ) {
-    pairs.push({
-      questionNumber: qNum || pairs.length + 1,
-      questionText: currentQ.trim(),
-      answerText: currentA.trim(),
-      pageNumber: 1,
-      confidence: 0.5,
-    });
-  }
-
-  return pairs.length > 0
-    ? pairs
-    : [
-        {
-          questionNumber: 1,
-          questionText: text.slice(0, 500),
-          answerText: "",
-          pageNumber: 1,
-          confidence: 0.3,
-        },
-      ];
 }
 
 export async function processPdfFile(opts: {
