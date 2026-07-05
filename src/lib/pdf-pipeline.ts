@@ -11,17 +11,15 @@ export interface ProcessedPair {
   confidence: number;
 }
 
-// ─── Magic-byte PDF signature check ─────────────────────────────────────────
 export function isPdfBuffer(buf: Buffer): boolean {
   return buf.length > 4 && buf.slice(0, 4).toString("binary") === "%PDF";
 }
 
-// ─── Extract text from a PDF buffer ─────────────────────────────────────────
 async function extractTextFromBuffer(
   buf: Buffer,
 ): Promise<{ text: string; pageCount: number }> {
   try {
-    
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pdfParse = require("pdf-parse");
     const result = await pdfParse(buf, { max: config.maxPdfPages });
     return { text: result.text ?? "", pageCount: result.numpages ?? 1 };
@@ -30,7 +28,6 @@ async function extractTextFromBuffer(
   }
 }
 
-// ─── AI-based Q/A splitting ──────────────────────────────────────────────────
 async function splitWithAI(
   rawText: string,
   fileName: string,
@@ -102,7 +99,6 @@ Return only valid JSON array.`;
   }
 }
 
-// ─── OCR fallback via AI vision (for scanned PDFs) ──────────────────────────
 async function ocrWithAI(buf: Buffer, fileName: string): Promise<string> {
   if (!config.aiApiKey) return "";
 
@@ -152,7 +148,6 @@ Include question numbers, question text, and answers exactly as written.`,
   }
 }
 
-// ─── Simple regex-based fallback splitter ────────────────────────────────────
 function splitFallback(text: string): ProcessedPair[] {
   const lines = text
     .split(/\n+/)
@@ -218,7 +213,6 @@ function splitFallback(text: string): ProcessedPair[] {
       ];
 }
 
-// ─── Main entry point ────────────────────────────────────────────────────────
 export async function processPdfFile(opts: {
   fileId: string;
   buf: Buffer;
@@ -240,7 +234,6 @@ export async function processPdfFile(opts: {
     rawText = extracted.text;
     pageCount = extracted.pageCount;
 
-    // If text layer is too short, try OCR via AI vision
     if (rawText.trim().length < 100 && config.aiApiKey) {
       rawText = await ocrWithAI(buf, fileName);
     }
@@ -273,7 +266,6 @@ export async function processPdfFile(opts: {
         published: false,
       });
 
-      // Generate and store embedding if provider configured
       if (config.embeddingEnabled) {
         const vector = await embed(pair.questionText);
         if (vector) await repo.storeEmbedding(q.id, vector);
