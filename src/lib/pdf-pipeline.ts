@@ -17,10 +17,12 @@ export function isPdfBuffer(buf: Buffer): boolean {
 }
 
 // ─── Extract text from a PDF buffer ─────────────────────────────────────────
-async function extractTextFromBuffer(buf: Buffer): Promise<{ text: string; pageCount: number }> {
+async function extractTextFromBuffer(
+  buf: Buffer,
+): Promise<{ text: string; pageCount: number }> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pdfParse = require("pdf-parse/lib/pdf-parse.js");
+    
+    const pdfParse = require("pdf-parse");
     const result = await pdfParse(buf, { max: config.maxPdfPages });
     return { text: result.text ?? "", pageCount: result.numpages ?? 1 };
   } catch {
@@ -29,7 +31,11 @@ async function extractTextFromBuffer(buf: Buffer): Promise<{ text: string; pageC
 }
 
 // ─── AI-based Q/A splitting ──────────────────────────────────────────────────
-async function splitWithAI(rawText: string, fileName: string, locale: "ar" | "en"): Promise<ProcessedPair[]> {
+async function splitWithAI(
+  rawText: string,
+  fileName: string,
+  locale: "ar" | "en",
+): Promise<ProcessedPair[]> {
   if (!config.aiApiKey) return splitFallback(rawText);
 
   const lang = locale === "ar" ? "Arabic" : "English";
@@ -40,34 +46,55 @@ The file content is:
 ${rawText.slice(0, 12000)}
 ---
 
-Return a JSON array (and only JSON, no markdown fences). Each element must have:
+Return a JSON array (and only JSON, no markdown fences).
+Each element must have:
 {
-  "questionNumber": <integer>,
-  "questionText": "<the question verbatim>",
-  "answerText": "<the full answer>",
-  "pageNumber": <integer or 1 if unknown>,
-  "confidence": <float 0.0-1.0>
+  "questionNumber": number,
+  "questionText": "",
+  "answerText": "",
+  "pageNumber": number,
+  "confidence": number
 }
 
 If the text contains both questions and answers (a solution file), extract every pair.
 If only questions, set answerText to "".
 Respond in ${lang} for text fields when applicable.
+
 Return only valid JSON array.`;
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.fileProcessingTimeoutMs);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      config.fileProcessingTimeoutMs,
+    );
+
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": config.aiApiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: config.aiAnswerModel, max_tokens: 4096, messages: [{ role: "user", content: prompt }] }),
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.aiApiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: config.aiAnswerModel,
+        max_tokens: 4096,
+        messages: [{ role: "user", content: prompt }],
+      }),
       signal: controller.signal,
     });
+
     clearTimeout(timeout);
+
     const data = await res.json();
-    const text = (data.content ?? []).map((b: { type: string; text?: string }) => b.text ?? "").join("").trim();
+    const text = (data.content ?? [])
+      .map((b: { type: string; text?: string }) => b.text ?? "")
+      .join("")
+      .trim();
+
     const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean) as ProcessedPair[];
+
     if (Array.isArray(parsed) && parsed.length > 0) return parsed;
     return splitFallback(rawText);
   } catch {
@@ -78,32 +105,63 @@ Return only valid JSON array.`;
 // ─── OCR fallback via AI vision (for scanned PDFs) ──────────────────────────
 async function ocrWithAI(buf: Buffer, fileName: string): Promise<string> {
   if (!config.aiApiKey) return "";
+
   const base64 = buf.toString("base64");
+
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": config.aiApiKey, "anthropic-version": "2023-06-01" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.aiApiKey,
+        "anthropic-version": "2023-06-01",
+      },
       body: JSON.stringify({
-        model: config.aiVisionModel, max_tokens: 4096,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-            { type: "text", text: `Extract all text from this scanned PDF document named "${fileName}". Include question numbers, question text, and answers exactly as written.` },
-          ],
-        }],
+        model: config.aiVisionModel,
+        max_tokens: 4096,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: base64,
+                },
+              },
+              {
+                type: "text",
+                text: `Extract all text from this scanned PDF document named "${fileName}".
+Include question numbers, question text, and answers exactly as written.`,
+              },
+            ],
+          },
+        ],
       }),
     });
+
     const data = await res.json();
-    return (data.content ?? []).map((b: { type: string; text?: string }) => b.text ?? "").join("").trim();
-  } catch { return ""; }
+    return (data.content ?? [])
+      .map((b: { type: string; text?: string }) => b.text ?? "")
+      .join("")
+      .trim();
+  } catch {
+    return "";
+  }
 }
 
 // ─── Simple regex-based fallback splitter ────────────────────────────────────
 function splitFallback(text: string): ProcessedPair[] {
-  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const lines = text
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
   const pairs: ProcessedPair[] = [];
   const qPattern = /^(?:Q\.?\s*|السؤال\s*|Question\s*)?(\d+)[.):\s]/i;
+
   let currentQ = "";
   let currentA = "";
   let qNum = 0;
@@ -111,10 +169,18 @@ function splitFallback(text: string): ProcessedPair[] {
 
   for (const line of lines) {
     const m = line.match(qPattern);
+
     if (m) {
       if (currentQ) {
-        pairs.push({ questionNumber: qNum, questionText: currentQ.trim(), answerText: currentA.trim(), pageNumber: 1, confidence: 0.6 });
+        pairs.push({
+          questionNumber: qNum,
+          questionText: currentQ.trim(),
+          answerText: currentA.trim(),
+          pageNumber: 1,
+          confidence: 0.6,
+        });
       }
+
       qNum = parseInt(m[1]);
       currentQ = line.replace(qPattern, "").trim();
       currentA = "";
@@ -128,16 +194,31 @@ function splitFallback(text: string): ProcessedPair[] {
       currentQ += " " + line;
     }
   }
+
   if (currentQ) {
-    pairs.push({ questionNumber: qNum || pairs.length + 1, questionText: currentQ.trim(), answerText: currentA.trim(), pageNumber: 1, confidence: 0.5 });
+    pairs.push({
+      questionNumber: qNum || pairs.length + 1,
+      questionText: currentQ.trim(),
+      answerText: currentA.trim(),
+      pageNumber: 1,
+      confidence: 0.5,
+    });
   }
-  return pairs.length > 0 ? pairs : [{
-    questionNumber: 1, questionText: text.slice(0, 500), answerText: "", pageNumber: 1, confidence: 0.3,
-  }];
+
+  return pairs.length > 0
+    ? pairs
+    : [
+        {
+          questionNumber: 1,
+          questionText: text.slice(0, 500),
+          answerText: "",
+          pageNumber: 1,
+          confidence: 0.3,
+        },
+      ];
 }
 
 // ─── Main entry point ────────────────────────────────────────────────────────
-
 export async function processPdfFile(opts: {
   fileId: string;
   buf: Buffer;
@@ -165,7 +246,10 @@ export async function processPdfFile(opts: {
     }
 
     if (!rawText.trim()) {
-      await repo.updateFile(fileId, { status: "failed", processingError: "Could not extract text from PDF" });
+      await repo.updateFile(fileId, {
+        status: "failed",
+        processingError: "Could not extract text from PDF",
+      });
       return;
     }
 
@@ -175,6 +259,7 @@ export async function processPdfFile(opts: {
 
     for (const pair of pairs) {
       if (!pair.questionText.trim()) continue;
+
       const q = await repo.createExtractedQuestion({
         sourceFileId: fileId,
         courseId,
