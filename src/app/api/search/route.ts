@@ -20,26 +20,53 @@ const requestSchema = z.object({
   pdf: z.object({ base64: z.string(), fileName: z.string(), sizeBytes: z.number() }).optional(),
 });
 
+function noAnswerMessage(question: string, locale: "ar" | "en"): string {
+  if (locale === "ar") {
+    return [
+      "لم نجد إجابة معتمدة لهذا السؤال في ملفات المقرر حتى الآن.",
+      "",
+      `> السؤال: ${question}`,
+      "",
+      "لم يتم تفعيل الذكاء الاصطناعي بعد في هذا الموقع.",
+      "جرّب صياغة السؤال بطريقة أخرى، أو راجع لاحقًا بعد إضافة ملفات أو حلول جديدة.",
+    ].join("\n");
+  }
+
+  return [
+    "We couldn't find an approved answer for this question in the course files yet.",
+    "",
+    `> Question: ${question}`,
+    "",
+    "AI is not enabled on this site yet.",
+    "Try rephrasing the question, or check back later after more files or solutions are added.",
+  ].join("\n");
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // Rate-limit by IP
     const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? "local";
     const rl = await checkRateLimit(`search:${ip}`);
+
     if (!rl.allowed) {
       return NextResponse.json({ error: "rate_limited" }, { status: 429 });
     }
 
     const body = await req.json();
     const parsed = requestSchema.safeParse(body);
+
     if (!parsed.success) {
-      return NextResponse.json({ error: "invalid_request", details: parsed.error.flatten() }, { status: 400 });
+      return NextResponse.json(
+        { error: "invalid_request", details: parsed.error.flatten() },
+        { status: 400 },
+      );
     }
+
     const { courseId, assignmentId, locale, text, image, pdf } = parsed.data;
 
-    // Validate course + assignment exist in repo (Supabase or demo)
     const repo = await getPublicRepo();
     const course = await repo.getCourseById(courseId);
     const assignment = await repo.getAssignmentById(assignmentId);
+
     if (!course || !assignment || assignment.courseId !== courseId) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
@@ -48,27 +75,29 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "no_input" }, { status: 400 });
     }
 
-    // File validations
     if (image) {
       if (!ALLOWED_IMAGE_TYPES.includes(image.mimeType)) {
         return NextResponse.json({ error: "invalid_image_type" }, { status: 400 });
       }
+
       const approxBytes = (image.base64.length * 3) / 4;
       if (approxBytes > config.maxUploadSizeMb * 1024 * 1024) {
         return NextResponse.json({ error: "file_too_large" }, { status: 400 });
       }
     }
+
     if (pdf) {
       if (pdf.sizeBytes > config.maxUploadSizeMb * 1024 * 1024) {
         return NextResponse.json({ error: "file_too_large" }, { status: 400 });
       }
+
       if (!pdf.fileName.toLowerCase().endsWith(".pdf")) {
         return NextResponse.json({ error: "invalid_pdf" }, { status: 400 });
       }
     }
 
-    // Extract raw text
     let rawContent = text?.trim() ?? "";
+
     if (image) {
       const extracted = await extractTextFromImage(image.base64, image.mimeType, locale);
       rawContent = extracted.rawText;
@@ -78,22 +107,20 @@ export async function POST(req: NextRequest) {
     }
 
     const questions = splitIntoQuestions(rawContent);
+
     if (questions.length === 0) {
       return NextResponse.json({ error: "no_questions_found" }, { status: 422 });
     }
 
-    // Build context for AI
-    const categoryName = course.categoryId; // will be enriched below
-    const cat = await (async () => {
-      try { return await repo.getCategoryBySlug(""); } catch { return null; }
-    })();
-    void cat;
     const specName = course.specializationId
       ? ((await repo.getSpecializationById(course.specializationId))?.nameEn ?? undefined)
       : undefined;
+
     const levelName = course.levelId
       ? ((await repo.getLevelById(course.levelId))?.nameEn ?? undefined)
       : undefined;
+
+    const categoryName = course.categoryId;
     const courseName = locale === "ar" ? course.nameAr : course.nameEn;
     const assignmentName = locale === "ar" ? assignment.nameAr : assignment.nameEn;
 
@@ -102,10 +129,7 @@ export async function POST(req: NextRequest) {
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
 
-      // Generate embedding for semantic search (null when provider not configured)
       const queryEmbedding = await embed(q);
-
-      // Search approved answers
       const matches = await repo.searchQuestions(courseId, assignmentId, q, queryEmbedding);
       const best = matches[0];
 
@@ -117,40 +141,53 @@ export async function POST(req: NextRequest) {
           source: "approved",
           confidence: best.score,
         });
-      } else {
-        // AI fallback
-        const aiAnswer = await generateAiAnswer(q, {
-          categoryName,
-          specializationName: specName,
-          levelName,
-          courseName,
-          assignmentName,
-          locale,
-        });
 
+        continue;
+      }
+
+      if (!config.aiApiKey) {
         results.push({
           questionIndex: i + 1,
           questionText: q,
-          answerMarkdown: aiAnswer,
+          answerMarkdown: noAnswerMessage(q, locale),
           source: "ai",
           confidence: 0,
         });
 
-        // Persist for admin review
-        await repo.saveAiAnswer({
-          questionText: q,
-          answerText: aiAnswer,
-          categoryId: course.categoryId,
-          specializationId: course.specializationId ?? undefined,
-          levelId: course.levelId ?? undefined,
-          courseId: course.id,
-          assignmentId: assignment.id,
-        });
+        continue;
       }
+
+      const aiAnswer = await generateAiAnswer(q, {
+        categoryName,
+        specializationName: specName,
+        levelName,
+        courseName,
+        assignmentName,
+        locale,
+      });
+
+      results.push({
+        questionIndex: i + 1,
+        questionText: q,
+        answerMarkdown: aiAnswer,
+        source: "ai",
+        confidence: 0,
+      });
+
+      await repo.saveAiAnswer({
+        questionText: q,
+        answerText: aiAnswer,
+        categoryId: course.categoryId,
+        specializationId: course.specializationId ?? undefined,
+        levelId: course.levelId ?? undefined,
+        courseId: course.id,
+        assignmentId: assignment.id,
+      });
     }
 
     return NextResponse.json({ results, isDemoMode: config.isDemoMode });
-  } catch {
+  } catch (error) {
+    console.error("Search API error:", error);
     return NextResponse.json({ error: "server_error" }, { status: 500 });
   }
 }

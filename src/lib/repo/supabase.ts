@@ -12,7 +12,13 @@ import { normalize } from "../search";
 import { config } from "../config";
 
 function err(label: string, e: unknown): never {
-  const msg = e instanceof Error ? e.message : String(e);
+  const msg =
+    e && typeof e === "object" && "message" in e
+      ? String((e as { message?: unknown }).message)
+      : e instanceof Error
+        ? e.message
+        : String(e);
+
   throw new Error(`[SupabaseRepo:${label}] ${msg}`);
 }
 

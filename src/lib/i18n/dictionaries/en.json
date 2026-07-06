@@ -37,7 +37,7 @@
     "step1": "Reading the submitted content...",
     "step2": "Extracting questions...",
     "step3": "Searching approved course solutions...",
-    "step4": "No approved answer found. Generating an AI answer...",
+    "step4": "No approved answer was found in the uploaded files.",
     "resultsTitle": "Results",
     "questionLabel": "Question {n}",
     "answerLabel": "Answer",
