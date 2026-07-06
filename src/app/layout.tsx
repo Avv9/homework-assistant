@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { Analytics } from "@vercel/analytics/next"
 import { FaGithub, FaTelegramPlane } from "react-icons/fa";
+
 
 import "./globals.css";
 
@@ -70,6 +72,7 @@ export default function RootLayout({ children }: RootLayoutProps) {
             </div>
           </footer>
         </Providers>
+        <Analytics />
       </body>
     </html>
   );
