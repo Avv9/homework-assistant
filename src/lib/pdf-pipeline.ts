@@ -24,7 +24,9 @@ export function isPdfBuffer(buf: Buffer): boolean {
  
 type PdfParseModule = typeof import("pdf-parse");
 type CanvasModule = typeof import("@napi-rs/canvas");
- 
+
+let workerConfigured = false;
+
 async function loadPdfParser(): Promise<PdfParseModule["PDFParse"]> {
   // pdf-parse (via pdfjs-dist) expects browser Canvas APIs (DOMMatrix,
   // ImageData, Path2D) to exist on globalThis. These don't exist in the
@@ -34,7 +36,7 @@ async function loadPdfParser(): Promise<PdfParseModule["PDFParse"]> {
   // therefore pdfjs-dist) before this polyfill runs, causing:
   // "ReferenceError: DOMMatrix is not defined"
   const canvas: CanvasModule = await import("@napi-rs/canvas");
- 
+
   // @napi-rs/canvas ships its own DOMMatrix/ImageData/Path2D type
   // declarations that don't exactly match lib.dom.d.ts (e.g. missing the
   // legacy `scaleNonUniform` method), even though they're compatible at
@@ -48,17 +50,33 @@ async function loadPdfParser(): Promise<PdfParseModule["PDFParse"]> {
     ImageData?: unknown;
     Path2D?: unknown;
   };
- 
+
   globalScope.DOMMatrix ??= canvas.DOMMatrix;
   globalScope.ImageData ??= canvas.ImageData;
   if (canvas.Path2D) {
     globalScope.Path2D ??= canvas.Path2D;
   }
- 
+
   const pdfParseModule: PdfParseModule = await import("pdf-parse");
+
+  if (!workerConfigured) {
+    // By default pdfjs-dist (used internally by pdf-parse) resolves its
+    // worker by file PATH at runtime (pdf.worker.mjs). On Vercel's
+    // serverless bundle that file often isn't present at the expected
+    // location — even with serverExternalPackages/outputFileTracingIncludes
+    // — because the path is built dynamically and isn't picked up by the
+    // tracer, causing:
+    // "Setting up fake worker failed: Cannot find module '.../pdf.worker.mjs'"
+    // `getData()` instead returns the worker source embedded as a string,
+    // so no file-system lookup is needed at runtime.
+    const { getData } = await import("pdf-parse/worker");
+    pdfParseModule.PDFParse.setWorker(getData());
+    workerConfigured = true;
+  }
+
   return pdfParseModule.PDFParse;
 }
- 
+
 async function extractTextFromBuffer(
   buf: Buffer,
 ): Promise<{ text: string; pageCount: number }> {
