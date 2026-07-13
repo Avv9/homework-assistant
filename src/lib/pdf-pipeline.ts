@@ -1,3 +1,4 @@
+import path from "path";
 import { config } from "./config";
 import { normalize } from "./search";
 import { embed } from "./embeddings";
@@ -310,6 +311,84 @@ Return only valid JSON array.`;
   }
 }
  
+let tesseractLangPath: string | null = null;
+
+function resolveTesseractLangPath(): string {
+  if (tesseractLangPath) return tesseractLangPath;
+  // Point directly at the locally-installed language data package instead
+  // of letting tesseract.js fall back to fetching it from a public CDN at
+  // runtime. On Vercel that fetch is slow/unreliable (cold starts, network
+  // egress restrictions) and adds an external dependency for something
+  // that should be fully self-contained in the deployed bundle.
+  //
+  // We intentionally build this path with `process.cwd()` + a relative
+  // string rather than `require.resolve(...)`: Turbopack statically
+  // analyzes require.resolve() calls and fails the build on the package's
+  // non-JS `.gz` data file ("Unknown module type"), even though the
+  // package is listed in `serverExternalPackages`. The relative path
+  // matches what `outputFileTracingIncludes` (next.config.ts) guarantees
+  // is present in the deployed function's filesystem.
+  tesseractLangPath = path.join(
+    process.cwd(),
+    "node_modules/@tesseract.js-data/eng/4.0.0",
+  );
+  return tesseractLangPath;
+}
+
+/**
+ * Free, local OCR fallback for PDFs that are image-only (e.g. a webpage
+ * screenshot printed to PDF) and therefore have no extractable text layer.
+ * Runs entirely on the server via tesseract.js + a locally bundled language
+ * pack — no external API calls, no API key required, no per-request cost.
+ */
+async function ocrWithTesseract(buf: Buffer): Promise<string> {
+  try {
+    const PDFParse = await loadPdfParser();
+    const parser = new PDFParse({ data: buf });
+
+    // These screenshot-style PDFs embed each page as a single raster image,
+    // so we extract those embedded images directly rather than rendering
+    // pages through pdfjs-dist's canvas pipeline (getScreenshot()), which
+    // is not fully compatible with @napi-rs/canvas for full-page rendering.
+    const images = await parser.getImage({
+      first: config.maxOcrPages,
+      imageBuffer: true,
+    });
+    if (typeof parser.destroy === "function") {
+      await parser.destroy();
+    }
+
+    const allImages = images.pages.flatMap((p: { images: { data: Uint8Array | Buffer }[] }) => p.images);
+    if (allImages.length === 0) return "";
+
+    const Tesseract = await import("tesseract.js");
+    const worker = await Tesseract.createWorker("eng", 1, {
+      langPath: resolveTesseractLangPath(),
+      gzip: true,
+      cachePath: "/tmp",
+      cacheMethod: "none",
+    });
+
+    let text = "";
+    try {
+      for (const page of images.pages) {
+        for (const img of page.images) {
+          const buffer = Buffer.from(img.data);
+          const { data } = await worker.recognize(buffer);
+          text += `\n${data.text}`;
+        }
+      }
+    } finally {
+      await worker.terminate();
+    }
+
+    return text.trim();
+  } catch (error) {
+    console.error("Local OCR (tesseract) failed:", error);
+    return "";
+  }
+}
+
 async function ocrWithAI(buf: Buffer, fileName: string): Promise<string> {
   if (!config.aiApiKey) return "";
  
@@ -380,8 +459,18 @@ export async function processPdfFile(opts: {
     rawText = extracted.text;
     pageCount = extracted.pageCount;
  
-    if (rawText.trim().length < 100 && config.aiApiKey) {
-      rawText = await ocrWithAI(buf, fileName);
+    if (rawText.trim().length < 100) {
+      // Try free local OCR first (no API key / cost required). Only fall
+      // back to paid AI-based OCR if local OCR still isn't enough and an
+      // AI API key is configured.
+      const localOcrText = await ocrWithTesseract(buf);
+      if (localOcrText.trim().length >= rawText.trim().length) {
+        rawText = localOcrText;
+      }
+
+      if (rawText.trim().length < 100 && config.aiApiKey) {
+        rawText = await ocrWithAI(buf, fileName);
+      }
     }
  
     if (!rawText.trim()) {
