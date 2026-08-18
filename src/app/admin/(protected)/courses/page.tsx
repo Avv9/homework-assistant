@@ -49,9 +49,8 @@ export default function CoursesPage() {
     setLevels(Array.isArray(levelsData) ? levelsData : []);
   };
 
-  useEffect(() => {
-    load();
-  }, []);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { load(); }, []); // load() only sets state from fetch; one-time mount effect
 
   const save = async () => {
     if (!editing) return;

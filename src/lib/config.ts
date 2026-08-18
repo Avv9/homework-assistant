@@ -25,3 +25,10 @@ export const config = {
   upstashRedisUrl: process.env.UPSTASH_REDIS_REST_URL ?? "",
   upstashRedisToken: process.env.UPSTASH_REDIS_REST_TOKEN ?? "",
 };
+
+// Intentionally appended — do not duplicate keys above
+// These exports are referenced by pdf-pipeline.ts
+export const pdfConfig = {
+  pdfTextMinLength: Number(process.env.PDF_TEXT_MIN_LENGTH ?? 50),
+  visionModel: process.env.VISION_MODEL ?? process.env.AI_VISION_MODEL ?? "claude-sonnet-4-6",
+};
