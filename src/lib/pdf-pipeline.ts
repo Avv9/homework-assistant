@@ -162,8 +162,17 @@ export async function extractPdfText(buf: Buffer, maxPages: number): Promise<Ext
   }
 
   const trimmed = text.trim();
-  const kind: PdfKind = trimmed.length < pdfConfig.pdfTextMinLength ? "scanned" : "text";
-  return { text: trimmed, pageCount: pageCount || 1, kind };
+
+  // Strip pdf-parse page separators ("-- N of M --") before checking
+  // if the PDF actually has a real text layer. These markers are always
+  // present and would fool the length check into thinking this is text-based.
+  const meaningful = trimmed
+    .replace(/--\s*\d+\s*of\s*\d+\s*--/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const kind: PdfKind = meaningful.length < pdfConfig.pdfTextMinLength ? "scanned" : "text";
+  return { text: meaningful, pageCount: pageCount || 1, kind };
 }
 
 // ─── Vision: one image → one or more Q/A pairs ───────────────────────────────
