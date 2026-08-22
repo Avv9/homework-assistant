@@ -46,3 +46,4 @@ export const pdfConfig = {
   pdfTextMinLength: Number(process.env.PDF_TEXT_MIN_LENGTH ?? 50),
   visionModel: process.env.VISION_MODEL ?? process.env.AI_VISION_MODEL ?? "claude-sonnet-4-6",
 };
+
