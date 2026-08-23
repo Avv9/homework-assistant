@@ -351,6 +351,40 @@ Set needsReview: true if answerText is empty. Respond in ${lang}. Return valid J
 // ─── Blackboard-aware regex fallback ─────────────────────────────────────────
 
 function splitTextFallback(text: string): ProcessedPair[] {
+  // ── Format: "Q1: question A) opt B) opt Answer: B" (inline) ──────────────
+  // Split on "Q1: ... Q2: ..." inline format
+  const inlineSplit = text.split(/Q(\d+):\s*/);
+  const inlineMatches: Array<[string, string]> = [];
+  for (let i = 1; i < inlineSplit.length - 1; i += 2) {
+    inlineMatches.push([inlineSplit[i], inlineSplit[i + 1] ?? ""]);
+  }
+  if (inlineMatches.length > 1) {
+    const pairs: ProcessedPair[] = [];
+    for (const m of inlineMatches) {
+      const qNum = parseInt(m[0], 10);
+      const block = m[1].trim();
+      // Extract answer: "Answer: B (False)" or "Answer: A"
+      const answerMatch = block.match(/Answer:\s*([A-D])(?:\s*\(([^)]+)\))?/i);
+      const answerLetter = answerMatch?.[1]?.toUpperCase() ?? null;
+      const answerFull = answerMatch?.[2] ?? answerLetter ?? null;
+      // Remove answer part from block to get question + choices
+      const withoutAnswer = block.replace(/Answer:\s*[A-D][^Q]*/i, "").trim();
+      // Extract choices: "A) text B) text"
+      const choiceParts = withoutAnswer.match(/[A-D]\)\s*[^A-D)]+/g) ?? [];
+      const choices = choiceParts.map(c => c.trim());
+      // Question text = everything before first choice
+      const firstChoiceIdx = withoutAnswer.search(/[A-D]\)/);
+      const questionText = firstChoiceIdx > 0 ? withoutAnswer.slice(0, firstChoiceIdx).trim() : withoutAnswer;
+      const selectedChoice = answerLetter ? choices.find(c => c.startsWith(answerLetter)) ?? answerFull ?? "" : "";
+      pairs.push({
+        questionNumber: qNum, questionText, choices,
+        selectedAnswer: selectedChoice || null, answerText: selectedChoice || answerFull || "",
+        pageNumber: 1, confidence: answerFull ? 0.88 : 0.6, needsReview: !answerFull,
+      });
+    }
+    if (pairs.length > 0) return pairs;
+  }
+
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const bbPattern = /^Question\s+(\d+)/i;
   const selectedSuffix = /\s*Selected\s*$/i;
