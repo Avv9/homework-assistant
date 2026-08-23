@@ -1,5 +1,17 @@
 "use client";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function safeFetch(url: string, fallback: any = []): Promise<any> {
+  try {
+    const res = await fetch(url);
+    if (res.status === 401) { window.location.href = "/admin/login"; return fallback; }
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    if (Array.isArray(fallback) && !Array.isArray(data)) return fallback;
+    return data ?? fallback;
+  } catch { return fallback; }
+}
+
 import { useEffect, useRef, useState } from "react";
 import { useLocale } from "@/lib/i18n/locale-provider";
 import { Card, CardContent } from "@/components/ui/card";
@@ -25,12 +37,12 @@ export default function FilesPage() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const load = () => {
-    fetch("/api/admin/files").then(r => r.json()).then(setFiles);
-    fetch("/api/admin/courses").then(r => r.json()).then((cs: Course[]) => {
+    safeFetch("/api/admin/files", []).then(setFiles);
+    safeFetch("/api/admin/courses", []).then((cs: Course[]) => {
       setCourses(cs);
       if (!courseId && cs[0]) setCourseId(cs[0].id);
     });
-    fetch("/api/admin/assignments").then(r => r.json()).then(setAssignments);
+    safeFetch("/api/admin/assignments", []).then(setAssignments);
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);

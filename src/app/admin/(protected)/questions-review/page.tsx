@@ -1,5 +1,17 @@
 "use client";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function safeFetch(url: string, fallback: any = []): Promise<any> {
+  try {
+    const res = await fetch(url);
+    if (res.status === 401) { window.location.href = "/admin/login"; return fallback; }
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    if (Array.isArray(fallback) && !Array.isArray(data)) return fallback;
+    return data ?? fallback;
+  } catch { return fallback; }
+}
+
 import { useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n/locale-provider";
 import { Card, CardContent } from "@/components/ui/card";
@@ -15,11 +27,11 @@ export default function QuestionsReviewPage() {
   const [drafts, setDrafts] = useState<Record<string, { questionText: string; answerText: string }>>({});
 
   const load = () => {
-    fetch("/api/admin/questions").then((r) => r.json()).then((qs: ExtractedQuestion[]) => {
+    safeFetch("/api/admin/questions", []).then((qs: ExtractedQuestion[]) => {
       setQuestions(qs);
       setDrafts(Object.fromEntries(qs.map((q) => [q.id, { questionText: q.questionText, answerText: q.answerText }])));
     });
-    fetch("/api/admin/files").then((r) => r.json()).then(setFiles);
+    safeFetch("/api/admin/files", []).then(setFiles);
   };
   useEffect(load, []);
 

@@ -1,5 +1,17 @@
 "use client";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function safeFetch(url: string, fallback: any = []): Promise<any> {
+  try {
+    const res = await fetch(url);
+    if (res.status === 401) { window.location.href = "/admin/login"; return fallback; }
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    if (Array.isArray(fallback) && !Array.isArray(data)) return fallback;
+    return data ?? fallback;
+  } catch { return fallback; }
+}
+
 import { useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n/locale-provider";
 import { Card, CardContent } from "@/components/ui/card";
@@ -14,7 +26,7 @@ export default function AiReviewPage() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   const load = () => {
-    fetch("/api/admin/ai-answers").then((r) => r.json()).then((data: AiGeneratedAnswer[]) => {
+    safeFetch("/api/admin/ai-answers", []).then((data: AiGeneratedAnswer[]) => {
       setItems(data);
       setDrafts(Object.fromEntries(data.map((d) => [d.id, d.answerText])));
     });
