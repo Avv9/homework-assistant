@@ -5,10 +5,13 @@ import { config } from "./config";
  * Recognizes common numbering styles: "1.", "1)", "Q1", "السؤال 1", arabic-indic digits, newlines.
  */
 export function splitIntoQuestions(raw: string): string[] {
-  const text = raw.trim();
+  const text = raw
+    .trim()
+    .replace(/\r\n?/g, "\n")
+    .replace(/\s+(?=(?:Q\.?\s*[\d٠-٩]+|السؤال\s*[\d٠-٩]+|[\d٠-٩]+[.)])\s+)/g, "\n");
   if (!text) return [];
 
-  const numberedPattern = /(?:^|\n)\s*(?:Q\.?\s*\d+|السؤال\s*\d+|\d+[.)]|[٠-٩]+[.)])\s*/g;
+  const numberedPattern = /(?:^|\n)\s*(?:Q\.?\s*[\d٠-٩]+|السؤال\s*[\d٠-٩]+|[\d٠-٩]+[.)])\s*/g;
   const hasNumbering = numberedPattern.test(text);
   numberedPattern.lastIndex = 0;
 

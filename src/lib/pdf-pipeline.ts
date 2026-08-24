@@ -105,7 +105,9 @@ export async function extractPdfText(buf: Buffer, maxPages: number): Promise<Ext
   // Strip pdf-parse page separators ("-- N of M --") — these are NOT real content
   const meaningful = text
     .replace(/--\s*\d+\s*of\s*\d+\s*--/gi, "")
-    .replace(/\s+/g, " ")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 
   const kind: PdfKind = meaningful.length < pdfConfig.pdfTextMinLength ? "scanned" : "text";
@@ -119,6 +121,7 @@ interface EmbeddedImage {
   imageIndex: number;
   dataUrl: string;
   sizeBytes: number;
+  source: "embedded" | "rendered-page";
 }
 
 async function extractEmbeddedImages(buf: Buffer, maxPages: number): Promise<EmbeddedImage[]> {
@@ -133,10 +136,39 @@ async function extractEmbeddedImages(buf: Buffer, maxPages: number): Promise<Emb
         if (!img.dataUrl) continue;
         const sizeBytes = img.data?.length ?? Math.round(img.dataUrl.length * 0.75);
         if (sizeBytes < 10000) continue; // skip tiny icons/bullets
-        images.push({ pageNumber: page.pageNumber, imageIndex: i, dataUrl: img.dataUrl, sizeBytes });
+        images.push({ pageNumber: page.pageNumber, imageIndex: i, dataUrl: img.dataUrl, sizeBytes, source: "embedded" });
       }
     }
     return images;
+  } finally {
+    await parser.destroy?.();
+  }
+}
+
+async function renderPdfPagesAsImages(buf: Buffer, maxPages: number): Promise<EmbeddedImage[]> {
+  const PDFParse = await getPdfParser();
+  const parser = new PDFParse({ data: buf });
+  try {
+    const result = await parser.getScreenshot({
+      first: maxPages,
+      desiredWidth: 1600,
+      imageDataUrl: true,
+      imageBuffer: true,
+    });
+
+    return (result.pages ?? [])
+      .map((page, idx) => {
+        const dataUrl = page.dataUrl || `data:image/png;base64,${Buffer.from(page.data ?? []).toString("base64")}`;
+        const sizeBytes = page.data?.length ?? Math.round(dataUrl.length * 0.75);
+        return {
+          pageNumber: page.pageNumber ?? idx + 1,
+          imageIndex: idx,
+          dataUrl,
+          sizeBytes,
+          source: "rendered-page" as const,
+        };
+      })
+      .filter((image) => image.sizeBytes > 10000);
   } finally {
     await parser.destroy?.();
   }
@@ -295,6 +327,18 @@ async function extractFromImageWithTesseract(
   const { text, confidence } = await ocrImage(imgBuf);
   if (!text.trim()) return [];
 
+  if (image.source === "rendered-page") {
+    return splitTextFallback(text)
+      .filter(pair => pair.questionText.trim().length >= 5)
+      .map((pair, idx) => ({
+        ...pair,
+        questionNumber: pair.questionNumber || globalImageIndex + idx + 1,
+        pageNumber: image.pageNumber,
+        confidence: Math.min(pair.confidence, confidence > 0 ? confidence : 0.6),
+        needsReview: pair.needsReview || confidence < 0.7,
+      }));
+  }
+
   const parsed = parseBlackboardOcr(text, globalImageIndex + 1);
 
   // Skip if no real question text was found
@@ -363,19 +407,26 @@ function splitTextFallback(text: string): ProcessedPair[] {
     for (const m of inlineMatches) {
       const qNum = parseInt(m[0], 10);
       const block = m[1].trim();
-      // Extract answer: "Answer: B (False)" or "Answer: A"
-      const answerMatch = block.match(/Answer:\s*([A-D])(?:\s*\(([^)]+)\))?/i);
+      // Extract answer: "Answer: B (False)", "Answer: A", or "Answer: True"
+      const answerMatch = block.match(/^Answer:\s*([A-D])(?:\s*\(([^)]+)\))?\s*$/im);
+      const textAnswerMatch = block.match(/^Answer:\s*(True|False)\s*$/im);
       const answerLetter = answerMatch?.[1]?.toUpperCase() ?? null;
-      const answerFull = answerMatch?.[2] ?? answerLetter ?? null;
-      // Remove answer part from block to get question + choices
-      const withoutAnswer = block.replace(/Answer:\s*[A-D][^Q]*/i, "").trim();
-      // Extract choices: "A) text B) text"
-      const choiceParts = withoutAnswer.match(/[A-D]\)\s*[^A-D)]+/g) ?? [];
-      const choices = choiceParts.map(c => c.trim());
-      // Question text = everything before first choice
-      const firstChoiceIdx = withoutAnswer.search(/[A-D]\)/);
-      const questionText = firstChoiceIdx > 0 ? withoutAnswer.slice(0, firstChoiceIdx).trim() : withoutAnswer;
-      const selectedChoice = answerLetter ? choices.find(c => c.startsWith(answerLetter)) ?? answerFull ?? "" : "";
+      const answerFull = answerMatch?.[2] ?? textAnswerMatch?.[1] ?? answerLetter ?? null;
+      // Remove answer line from block to get question + choices
+      const withoutAnswer = block.replace(/^Answer:\s*(?:[A-D].*|True|False)\s*$/gim, "").trim();
+      const blockLines = withoutAnswer.split(/\n+/).map(line => line.trim()).filter(Boolean);
+      const firstChoiceLineIdx = blockLines.findIndex(line => /^[A-D]\)\s*/.test(line));
+      const choices = firstChoiceLineIdx >= 0
+        ? blockLines.slice(firstChoiceLineIdx).filter(line => /^[A-D]\)\s*/.test(line))
+        : (withoutAnswer.match(/(?:^|\s)([A-D]\)\s+.*?)(?=\s+[A-D]\)\s+|$)/g) ?? []).map(c => c.trim());
+      const questionText = firstChoiceLineIdx >= 0
+        ? blockLines.slice(0, firstChoiceLineIdx).join("\n").trim()
+        : withoutAnswer.replace(/(?:^|\s)[A-D]\)\s+.*?(?=\s+[A-D]\)\s+|$)/g, "").trim();
+      const selectedChoice = answerLetter
+        ? choices.find(c => c.startsWith(answerLetter)) ?? answerFull ?? ""
+        : answerFull
+          ? choices.find(c => c.replace(/^[A-D]\)\s*/, "").trim().toLowerCase() === answerFull.toLowerCase()) ?? answerFull
+          : "";
       pairs.push({
         questionNumber: qNum, questionText, choices,
         selectedAnswer: selectedChoice || null, answerText: selectedChoice || answerFull || "",
@@ -467,6 +518,7 @@ export async function processPdfFile(opts: {
 
     let pairs: ProcessedPair[] = [];
     const provider = getVisionProvider();
+    let usedRenderedPages = false;
 
     if (extraction.kind === "text") {
       // Text-based PDF
@@ -474,15 +526,29 @@ export async function processPdfFile(opts: {
     } else {
       // Scanned / image-based PDF
       let embeddedImages: EmbeddedImage[] = [];
+      const imageExtractionErrors: string[] = [];
       try {
         embeddedImages = await extractEmbeddedImages(buf, config.maxPdfPages);
       } catch (e) {
-        await repo.updateFile(fileId, { status: "failed", processingError: `Image extraction failed: ${e instanceof Error ? e.message : String(e)}` });
-        return;
+        imageExtractionErrors.push(`embedded image extraction failed: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       if (embeddedImages.length === 0) {
-        await repo.updateFile(fileId, { status: "failed", processingError: "PDF has no text and no embedded images. Please upload a clearer PDF." });
+        try {
+          embeddedImages = await renderPdfPagesAsImages(buf, config.maxPdfPages);
+          usedRenderedPages = embeddedImages.length > 0;
+        } catch (e) {
+          imageExtractionErrors.push(`page rendering failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      if (embeddedImages.length === 0) {
+        await repo.updateFile(fileId, {
+          status: "failed",
+          processingError: imageExtractionErrors.length > 0
+            ? `PDF has no text and image extraction failed: ${imageExtractionErrors.join("; ")}`
+            : "PDF has no text, no extractable images, and no renderable pages. Please upload a clearer PDF.",
+        });
         return;
       }
 
@@ -547,10 +613,12 @@ export async function processPdfFile(opts: {
       }
     }
 
-    const providerNote = provider === "tesseract" ? " (OCR via Tesseract — review carefully)" : "";
+    const providerNote = extraction.kind === "scanned" && provider === "tesseract"
+      ? ` (OCR via Tesseract${usedRenderedPages ? " rendered pages" : ""} - review carefully)`
+      : undefined;
     await repo.updateFile(fileId, {
       status: "needs_review",
-      processingError: providerNote || undefined,
+      processingError: providerNote,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
