@@ -595,6 +595,12 @@ export async function processPdfFile(opts: {
     let pairs: ProcessedPair[] = [];
     const provider = getVisionProvider();
     let usedRenderedPages = false;
+    const imagePageLimit = provider === "tesseract"
+      ? Math.min(config.maxPdfPages, config.maxOcrPages)
+      : config.maxPdfPages;
+    const limitedOcrNote = extraction.kind === "scanned" && provider === "tesseract" && extraction.pageCount > imagePageLimit
+      ? `OCR processed first ${imagePageLimit}/${extraction.pageCount} pages. Increase MAX_OCR_PAGES if you need full scanned-PDF coverage.`
+      : undefined;
 
     if (extraction.kind === "text") {
       // Text-based PDF
@@ -604,14 +610,14 @@ export async function processPdfFile(opts: {
       let embeddedImages: EmbeddedImage[] = [];
       const imageExtractionErrors: string[] = [];
       try {
-        embeddedImages = await extractEmbeddedImages(buf, config.maxPdfPages);
+        embeddedImages = await extractEmbeddedImages(buf, imagePageLimit);
       } catch (e) {
         imageExtractionErrors.push(`embedded image extraction failed: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       if (embeddedImages.length === 0) {
         try {
-          embeddedImages = await renderPdfPagesAsImages(buf, config.maxPdfPages);
+          embeddedImages = await renderPdfPagesAsImages(buf, imagePageLimit);
           usedRenderedPages = embeddedImages.length > 0;
         } catch (e) {
           imageExtractionErrors.push(`page rendering failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -668,33 +674,70 @@ export async function processPdfFile(opts: {
     });
     unique.sort((a, b) => a.questionNumber - b.questionNumber);
 
-    // Persist
+    if (unique.length === 0) {
+      await repo.updateFile(fileId, {
+        status: "failed",
+        processingError: "No usable questions remained after cleanup. Please review the PDF quality or split the file.",
+      });
+      return;
+    }
+
+    // Persist without creating duplicates when a file is reprocessed.
+    const existingQuestions = await repo.getExtractedQuestions({ sourceFileId: fileId });
+    const existingByNumber = new Map(
+      existingQuestions
+        .filter((question) => typeof question.questionNumber === "number")
+        .map((question) => [question.questionNumber as number, question]),
+    );
+    const existingByNormalized = new Map(existingQuestions.map((question) => [question.normalizedText, question]));
+    const touchedExistingIds = new Set<string>();
+
     for (const pair of unique) {
-      const q = await repo.createExtractedQuestion({
+      const questionText = pair.questionText.trim();
+      const answerText = pair.answerText.trim();
+      const normalizedText = normalize(questionText);
+      const existing = existingByNumber.get(pair.questionNumber) ?? existingByNormalized.get(normalizedText);
+      const data = {
         sourceFileId: fileId,
         courseId,
         assignmentId,
         questionNumber: pair.questionNumber,
-        questionText: pair.questionText.trim(),
-        normalizedText: normalize(pair.questionText),
-        answerText: pair.answerText.trim(),
+        questionText,
+        normalizedText,
+        answerText,
         pageNumber: pair.pageNumber,
         confidence: pair.confidence,
         published: false,
-      });
+      };
+
+      const q = existing
+        ? await repo.updateExtractedQuestion(existing.id, data)
+        : await repo.createExtractedQuestion(data);
+
+      if (existing) touchedExistingIds.add(existing.id);
 
       if (config.embeddingEnabled) {
-        const vector = await embed(pair.questionText);
+        const vector = await embed(questionText);
         if (vector) await repo.storeEmbedding(q.id, vector);
+      }
+    }
+
+    for (const oldQuestion of existingQuestions) {
+      if (!oldQuestion.published && !touchedExistingIds.has(oldQuestion.id)) {
+        await repo.deleteExtractedQuestion(oldQuestion.id);
       }
     }
 
     const providerNote = extraction.kind === "scanned" && provider === "tesseract"
       ? ` (OCR via Tesseract${usedRenderedPages ? " rendered pages" : ""} - review carefully)`
       : undefined;
+    const missingAnswers = unique.filter(pair => !pair.answerText.trim()).length;
+    const reviewNote = missingAnswers > 0
+      ? `${missingAnswers}/${unique.length} extracted questions need answer review.`
+      : undefined;
     await repo.updateFile(fileId, {
       status: "needs_review",
-      processingError: providerNote,
+      processingError: [providerNote, limitedOcrNote, reviewNote].filter(Boolean).join(" "),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";

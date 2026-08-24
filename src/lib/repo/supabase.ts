@@ -337,6 +337,9 @@ export class SupabaseRepo implements AdminRepo {
   async updateExtractedQuestion(id: string, data: Partial<ExtractedQuestion>): Promise<ExtractedQuestion> {
     const patch: Record<string, unknown> = {};
     if (data.questionText !== undefined) { patch.question_text = data.questionText; patch.normalized_text = normalize(data.questionText); }
+    if (data.normalizedText !== undefined && data.questionText === undefined) patch.normalized_text = data.normalizedText;
+    if (data.questionNumber !== undefined) patch.question_number = data.questionNumber;
+    if (data.pageNumber !== undefined) patch.page_number = data.pageNumber;
     if (data.published !== undefined) patch.published = data.published;
     if (data.confidence !== undefined) patch.confidence = data.confidence;
     const { data: r, error } = await this.db.from("extracted_questions").update(patch).eq("id", id).select().single();

@@ -119,7 +119,16 @@ export class DemoRepo implements AdminRepo {
     });
   }
   async createExtractedQuestion(data:Omit<ExtractedQuestion,"id">) { const item={...data,id:uid()}; store.extractedQuestions.push(item); return item; }
-  async updateExtractedQuestion(id:string,data:Partial<ExtractedQuestion>) { const i=store.extractedQuestions.findIndex(q=>q.id===id); if(i<0) throw new Error("not_found"); store.extractedQuestions[i]={...store.extractedQuestions[i],...data}; return store.extractedQuestions[i]; }
+  async updateExtractedQuestion(id:string,data:Partial<ExtractedQuestion>) {
+    const i=store.extractedQuestions.findIndex(q=>q.id===id);
+    if(i<0) throw new Error("not_found");
+    store.extractedQuestions[i]={
+      ...store.extractedQuestions[i],
+      ...data,
+      ...(data.questionText !== undefined && { normalizedText: normalize(data.questionText) }),
+    };
+    return store.extractedQuestions[i];
+  }
   async deleteExtractedQuestion(id:string) { store.extractedQuestions=store.extractedQuestions.filter(q=>q.id!==id); }
   async publishQuestionsForFile(sourceFileId:string) {
     store.extractedQuestions=store.extractedQuestions.map(q=>q.sourceFileId===sourceFileId?{...q,published:true}:q);

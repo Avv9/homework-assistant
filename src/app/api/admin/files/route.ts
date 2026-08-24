@@ -3,20 +3,16 @@ import { requireAdmin } from "@/lib/admin-auth";
 import { getAdminRepo } from "@/lib/repo";
 import { config } from "@/lib/config";
 import { isPdfBuffer, processPdfFile } from "@/lib/pdf-pipeline";
+import {
+  getFileById,
+  getNextQueuedFile,
+  processStoredPdfFile,
+  safeStorageFileName,
+  summarizeFileQueue,
+} from "@/lib/admin/file-processing";
 
-function safeStorageFileName(fileName: string) {
-  const extension = fileName.toLowerCase().endsWith(".pdf") ? ".pdf" : "";
-  const baseName = extension ? fileName.slice(0, -extension.length) : fileName;
-  const cleanedBase = baseName
-    .normalize("NFKD")
-    .replace(/[\\/]+/g, "_")
-    .replace(/[^a-zA-Z0-9._ -]+/g, "_")
-    .replace(/\s+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .replace(/^\.+|\.+$/g, "");
-  return `${cleanedBase || "upload"}${extension}`;
-}
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function uploadError(error: string, status = 400, details?: Record<string, unknown>) {
   return NextResponse.json({ error, details }, { status });
@@ -54,8 +50,8 @@ export async function POST(req: NextRequest) {
 
     for (const file of files) {
       // Extension + MIME validation
-      const name = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      if (!name.toLowerCase().endsWith(".pdf")) {
+      const safeName = safeStorageFileName(file.name);
+      if (!file.name.toLowerCase().endsWith(".pdf")) {
         return NextResponse.json({ error: `invalid_type: ${file.name}` }, { status: 400 });
       }
       if (file.size > config.maxUploadSizeMb * 1024 * 1024) {
@@ -70,7 +66,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `not_a_pdf: ${file.name}` }, { status: 400 });
       }
 
-      let storagePath = `course-files/${courseId}/${assignmentId}/${Date.now()}_${name}`;
+      let storagePath = `course-files/${courseId}/${assignmentId}/${Date.now()}_${crypto.randomUUID()}_${safeName}`;
 
 
       if (!config.isDemoMode && config.supabaseUrl && config.supabaseServiceRoleKey) {
@@ -85,20 +81,20 @@ export async function POST(req: NextRequest) {
         }
       } else {
         // Demo: use a pseudo path (no actual upload)
-        storagePath = `demo/${courseId}/${assignmentId}/${name}`;
+        storagePath = `demo/${courseId}/${assignmentId}/${safeName}`;
       }
 
       const record = await repo.createFile({
-        courseId, assignmentId, storagePath, fileName: name,
+        courseId, assignmentId, storagePath, fileName: file.name,
         sizeBytes: file.size, status: "uploaded",
       });
       const fileId = record.id;
       created.push(record);
-      await repo.addAuditEntry({ adminId: guard.admin.id, adminEmail: guard.admin.email, action: "upload_file", entityType: "source_file", entityId: fileId, metadata: { fileName: name, sizeBytes: file.size } });
+      await repo.addAuditEntry({ adminId: guard.admin.id, adminEmail: guard.admin.email, action: "upload_file", entityType: "source_file", entityId: fileId, metadata: { fileName: file.name, sizeBytes: file.size } });
 
       // Start async processing (non-blocking in production; awaited here to keep response manageable)
       // In production, offload to a queue/background worker.
-      processPdfFile({ fileId, buf, fileName: name, courseId, assignmentId, locale, repo }).catch(console.error);
+      processPdfFile({ fileId, buf, fileName: file.name, courseId, assignmentId, locale, repo }).catch(console.error);
     }
 
     return NextResponse.json(created, { status: 201 });
@@ -106,6 +102,61 @@ export async function POST(req: NextRequest) {
 
   // ── JSON paths: direct-to-storage upload and demo metadata upload ─────────
   const body = await req.json();
+
+  if (body.action === "process_next") {
+    const repo = await getAdminRepo();
+    const locale = (body.locale as "ar" | "en") ?? "en";
+    const courseId = typeof body.courseId === "string" && body.courseId ? body.courseId : undefined;
+    const assignmentId = typeof body.assignmentId === "string" && body.assignmentId ? body.assignmentId : undefined;
+    const files = await repo.getFiles({ courseId, assignmentId });
+    const next = getNextQueuedFile(files);
+
+    if (!next) {
+      return NextResponse.json({ ok: true, processed: false, stats: summarizeFileQueue(files) });
+    }
+
+    const processed = await processStoredPdfFile({ file: next, repo, locale });
+    const refreshedFiles = await repo.getFiles({ courseId, assignmentId });
+    await repo.addAuditEntry({
+      adminId: guard.admin.id,
+      adminEmail: guard.admin.email,
+      action: "process_file",
+      entityType: "source_file",
+      entityId: processed.id,
+      metadata: { fileName: processed.fileName, status: processed.status, queueMode: true },
+    });
+
+    return NextResponse.json({
+      ok: true,
+      processed: true,
+      file: processed,
+      stats: summarizeFileQueue(refreshedFiles),
+    });
+  }
+
+  if (body.action === "retry_failed") {
+    const repo = await getAdminRepo();
+    const courseId = typeof body.courseId === "string" && body.courseId ? body.courseId : undefined;
+    const assignmentId = typeof body.assignmentId === "string" && body.assignmentId ? body.assignmentId : undefined;
+    const files = await repo.getFiles({ courseId, assignmentId });
+    const failed = files.filter((file) => file.status === "failed");
+
+    for (const file of failed) {
+      await repo.updateFile(file.id, { status: "uploaded", processingError: "" });
+    }
+
+    await repo.addAuditEntry({
+      adminId: guard.admin.id,
+      adminEmail: guard.admin.email,
+      action: "retry_failed_files",
+      entityType: "source_file",
+      metadata: { count: failed.length, courseId, assignmentId },
+    });
+
+    const refreshedFiles = await repo.getFiles({ courseId, assignmentId });
+    return NextResponse.json({ ok: true, retried: failed.length, stats: summarizeFileQueue(refreshedFiles) });
+  }
+
   if (body.action === "create_signed_upload") {
     const { fileName, sizeBytes, courseId, assignmentId } = body;
     if (!fileName || !courseId || !assignmentId || !Number.isFinite(Number(sizeBytes))) {
@@ -121,10 +172,10 @@ export async function POST(req: NextRequest) {
       return uploadError("direct_upload_unavailable", 503);
     }
 
-    const { createServiceClient } = await import("@/lib/supabase/server");
-    const sb = await createServiceClient();
     const safeName = safeStorageFileName(String(fileName));
     const storagePath = `course-files/${courseId}/${assignmentId}/${Date.now()}_${crypto.randomUUID()}_${safeName}`;
+    const { createServiceClient } = await import("@/lib/supabase/server");
+    const sb = await createServiceClient();
     const { data, error } = await sb.storage.from("course-files").createSignedUploadUrl(storagePath, { upsert: false });
     if (error || !data) {
       return uploadError("signed_upload_error", 500, { message: error?.message });
@@ -168,25 +219,6 @@ export async function POST(req: NextRequest) {
       metadata: { fileName, sizeBytes, uploadMode: "signed" },
     });
 
-    const { createServiceClient } = await import("@/lib/supabase/server");
-    const sb = await createServiceClient();
-    sb.storage.from("course-files").download(storagePath)
-      .then(async ({ data: dl, error }) => {
-        if (error || !dl) {
-          await repo.updateFile(record.id, { status: "failed", processingError: `storage_download_error: ${error?.message ?? "file not found"}` });
-          return;
-        }
-        const buf = Buffer.from(await dl.arrayBuffer());
-        if (!isPdfBuffer(buf)) {
-          await repo.updateFile(record.id, { status: "failed", processingError: "not_a_pdf" });
-          return;
-        }
-        await processPdfFile({ fileId: record.id, buf, fileName: String(fileName), courseId, assignmentId, locale: (body.locale as "ar" | "en") ?? "en", repo });
-      })
-      .catch(async (e) => {
-        await repo.updateFile(record.id, { status: "failed", processingError: e instanceof Error ? e.message : String(e) });
-      });
-
     return NextResponse.json(record, { status: 201 });
   }
 
@@ -222,25 +254,20 @@ export async function PATCH(req: NextRequest) {
   const repo = await getAdminRepo();
 
   if (data.reprocess) {
-    // Reprocess: fetch storage file, run pipeline again
-    if (!config.isDemoMode && config.supabaseUrl) {
-      const files = await repo.getFiles({});
-      const f = files.find(f => f.id === id);
-      if (f && f.storagePath) {
-        const { createServiceClient } = await import("@/lib/supabase/server");
-        const sb = await createServiceClient();
-        const { data: dl } = await sb.storage.from("course-files").download(f.storagePath);
-        if (dl) {
-          const buf = Buffer.from(await dl.arrayBuffer());
-          const locale = (body.locale as "ar" | "en") ?? "en";
-          await repo.updateFile(id, { status: "processing" });
-          processPdfFile({ fileId: id, buf, fileName: f.fileName, courseId: f.courseId, assignmentId: f.assignmentId, locale, repo }).catch(console.error);
-          return NextResponse.json({ ok: true, status: "processing" });
-        }
-      }
+    const file = await getFileById(repo, id);
+    if (!file) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
-    const updated = await repo.updateFile(id, { status: "needs_review" });
-    return NextResponse.json(updated);
+    const updated = await processStoredPdfFile({ file, repo, locale: (body.locale as "ar" | "en") ?? "en" });
+    await repo.addAuditEntry({
+      adminId: guard.admin.id,
+      adminEmail: guard.admin.email,
+      action: "reprocess_file",
+      entityType: "source_file",
+      entityId: id,
+      metadata: { fileName: file.fileName, status: updated.status },
+    });
+    return NextResponse.json({ ok: true, file: updated });
   }
 
   const updated = await repo.updateFile(id, data);
