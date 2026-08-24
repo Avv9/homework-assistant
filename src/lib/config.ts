@@ -27,8 +27,8 @@ export const config = {
   embeddingEnabled: Boolean(process.env.EMBEDDING_API_KEY),
 
   // ── Limits ───────────────────────────────────────────────────────────────
-  maxUploadSizeMb: Number(process.env.MAX_UPLOAD_SIZE_MB ?? 15),
-  maxPdfPages: Number(process.env.MAX_PDF_PAGES ?? 10),
+  maxUploadSizeMb: Number(process.env.MAX_UPLOAD_SIZE_MB ?? 50),
+  maxPdfPages: Number(process.env.MAX_PDF_PAGES ?? 50),
   maxOcrPages: Number(process.env.MAX_OCR_PAGES ?? 8),
   maxQuestionsPerRequest: Number(process.env.MAX_QUESTIONS_PER_REQUEST ?? 10),
   rateLimitCount: Number(process.env.RATE_LIMIT_COUNT ?? 20),

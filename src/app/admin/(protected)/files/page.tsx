@@ -20,10 +20,34 @@ import { Badge, Alert } from "@/components/ui/primitives";
 import { UploadCloud, Trash2, RotateCcw, FileSearch } from "lucide-react";
 import Link from "next/link";
 import type { Assignment, Course, SourceFile } from "@/lib/types";
+import { createClient } from "@/lib/supabase/client";
 
 const STATUS_VARIANT: Record<string, "outline" | "ai" | "success"> = {
   uploaded: "outline", processing: "outline", needs_review: "ai", published: "success", failed: "outline",
 };
+
+type UploadItem = {
+  id: string;
+  name: string;
+  size: number;
+  status: "queued" | "preparing" | "uploading" | "finalizing" | "done" | "failed";
+  message?: string;
+};
+
+function formatBytes(size: number) {
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function readableUploadError(error: string, details?: Record<string, unknown>) {
+  if (error === "file_too_large") return `File is larger than the configured limit (${details?.maxUploadSizeMb ?? "?"} MB).`;
+  if (error === "invalid_type") return "Only PDF files are accepted.";
+  if (error === "signed_upload_error") return `Could not prepare storage upload${details?.message ? `: ${details.message}` : "."}`;
+  if (error === "direct_upload_unavailable") return "Direct upload is not configured. Check Supabase environment variables.";
+  if (error === "unauthenticated") return "Your admin session expired. Please sign in again.";
+  if (error === "forbidden") return "Your admin account does not have permission to upload files.";
+  return error || "Upload failed.";
+}
 
 export default function FilesPage() {
   const { t, locale } = useLocale();
@@ -34,6 +58,7 @@ export default function FilesPage() {
   const [assignmentId, setAssignmentId] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const load = () => {
@@ -54,24 +79,92 @@ export default function FilesPage() {
       setUploadError("Please select a course and assignment first.");
       return;
     }
-    setUploadError(null);
-    setUploading(true);
-    try {
-      const formData = new FormData();
-      formData.append("courseId", courseId);
-      formData.append("assignmentId", assignmentId);
-      formData.append("locale", locale);
-      for (const file of Array.from(fileList)) formData.append("files", file);
+    const selectedFiles = Array.from(fileList);
+    if (selectedFiles.length === 0) return;
 
-      const res = await fetch("/api/admin/files", { method: "POST", body: formData });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        setUploadError(d.error ?? "Upload failed");
-      } else {
-        load();
+    setUploadError(null);
+    setUploadItems(selectedFiles.map(file => ({
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      name: file.name,
+      size: file.size,
+      status: "queued",
+    })));
+    setUploading(true);
+
+    const setItem = (id: string, patch: Partial<UploadItem>) => {
+      setUploadItems(items => items.map(item => item.id === id ? { ...item, ...patch } : item));
+    };
+
+    try {
+      const supabase = createClient();
+      for (const file of selectedFiles) {
+        const id = `${file.name}-${file.size}-${file.lastModified}`;
+        try {
+          if (!file.name.toLowerCase().endsWith(".pdf")) {
+            setItem(id, { status: "failed", message: "Only PDF files are accepted." });
+            continue;
+          }
+
+          setItem(id, { status: "preparing", message: "Preparing upload..." });
+          const prepRes = await fetch("/api/admin/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "create_signed_upload",
+              courseId,
+              assignmentId,
+              locale,
+              fileName: file.name,
+              sizeBytes: file.size,
+              contentType: file.type || "application/pdf",
+            }),
+          });
+          const prep = await prepRes.json().catch(() => ({}));
+          if (!prepRes.ok) {
+            setItem(id, { status: "failed", message: readableUploadError(prep.error, prep.details) });
+            continue;
+          }
+
+          setItem(id, { status: "uploading", message: "Uploading to storage..." });
+          const { error: uploadStorageError } = await supabase.storage
+            .from(prep.bucket)
+            .uploadToSignedUrl(prep.storagePath, prep.token, file, {
+              contentType: file.type || "application/pdf",
+            });
+          if (uploadStorageError) {
+            setItem(id, { status: "failed", message: uploadStorageError.message });
+            continue;
+          }
+
+          setItem(id, { status: "finalizing", message: "Saving file record..." });
+          const finishRes = await fetch("/api/admin/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "finalize_signed_upload",
+              courseId,
+              assignmentId,
+              locale,
+              storagePath: prep.storagePath,
+              fileName: file.name,
+              sizeBytes: file.size,
+            }),
+          });
+          const finish = await finishRes.json().catch(() => ({}));
+          if (!finishRes.ok) {
+            setItem(id, { status: "failed", message: readableUploadError(finish.error, finish.details) });
+            continue;
+          }
+
+          setItem(id, { status: "done", message: "Uploaded. Processing started." });
+        } catch (e) {
+          setItem(id, { status: "failed", message: e instanceof Error ? e.message : "Upload failed." });
+        }
       }
+      load();
     } finally {
       setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
     }
   };
 
@@ -105,6 +198,21 @@ export default function FilesPage() {
             </select>
           </div>
           {uploadError && <Alert variant="destructive">{uploadError}</Alert>}
+          {uploadItems.length > 0 && (
+            <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
+              {uploadItems.map(item => (
+                <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <div>
+                    <p className="font-medium text-foreground">{item.name}</p>
+                    <p className="text-xs text-muted-foreground">{formatBytes(item.size)}{item.message ? ` - ${item.message}` : ""}</p>
+                  </div>
+                  <Badge variant={item.status === "done" ? "success" : item.status === "failed" ? "outline" : "ai"}>
+                    {item.status}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          )}
           <div
             onDragOver={e => e.preventDefault()}
             onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}

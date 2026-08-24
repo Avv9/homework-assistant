@@ -437,6 +437,9 @@ function splitTextFallback(text: string): ProcessedPair[] {
   }
 
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const choiceBlocks = splitChoiceBlocksFallback(lines);
+  if (choiceBlocks.length > 1) return choiceBlocks;
+
   const bbPattern = /^Question\s+(\d+)/i;
   const selectedSuffix = /\s*Selected\s*$/i;
   const radioPrefix = /^[\(©OoO○●\u00A9\u25CB\u25CF]+\s*/;
@@ -473,9 +476,82 @@ function splitTextFallback(text: string): ProcessedPair[] {
   if (cur) blocks.push(finalize(cur));
 
   if (blocks.length === 0) {
-    return [{ questionNumber: 1, questionText: lines.slice(0, 10).join(" "), choices: [], selectedAnswer: null, answerText: "", pageNumber: 1, confidence: 0.3, needsReview: true }];
+    return choiceBlocks.length > 0 ? choiceBlocks : [{ questionNumber: 1, questionText: lines.slice(0, 10).join(" "), choices: [], selectedAnswer: null, answerText: "", pageNumber: 1, confidence: 0.3, needsReview: true }];
   }
   return blocks;
+}
+
+function splitChoiceBlocksFallback(lines: string[]): ProcessedPair[] {
+  const optionPattern = /^([A-Da-d])[.)]\s+(.+)$/;
+  const answerPattern = /^Answer\s*[:\-]\s*(.+)$/i;
+  const skipPatterns = [
+    /^-- \d+ of \d+ --$/i,
+    /^page \d+ of \d+$/i,
+    /^\d+$/,
+  ];
+
+  const blocks: Array<{ parts: string[]; choices: string[]; answer: string | null }> = [];
+  let cur: { parts: string[]; choices: string[]; answer: string | null } = { parts: [], choices: [], answer: null };
+
+  const flush = () => {
+    const parts = trimQuestionNoise(cur.parts);
+    if (parts.length > 0 && cur.choices.length >= 2) {
+      blocks.push({ parts, choices: cur.choices, answer: cur.answer });
+    }
+    cur = { parts: [], choices: [], answer: null };
+  };
+
+  for (const rawLine of lines) {
+    if (skipPatterns.some(pattern => pattern.test(rawLine))) continue;
+    const numbered = rawLine.match(/^(?:Q\s*)?(\d{1,3})[.)]\s*(.+)$/i);
+    const line = numbered && !optionPattern.test(rawLine) ? numbered[2].trim() : rawLine;
+    const option = line.match(optionPattern);
+    const answer = line.match(answerPattern);
+
+    if (answer && cur.choices.length > 0) {
+      cur.answer = answer[1].trim();
+      continue;
+    }
+
+    if (option) {
+      cur.choices.push(`${option[1].toUpperCase()}) ${option[2].trim()}`);
+      continue;
+    }
+
+    if (cur.choices.length >= 2) flush();
+    cur.parts.push(line);
+  }
+  flush();
+
+  return blocks.map((block, idx) => {
+    const answerText = resolveChoiceAnswer(block.answer, block.choices);
+    return {
+      questionNumber: idx + 1,
+      questionText: block.parts.join(" ").replace(/\s+/g, " ").trim(),
+      choices: block.choices,
+      selectedAnswer: answerText || null,
+      answerText,
+      pageNumber: 1,
+      confidence: answerText ? 0.78 : 0.58,
+      needsReview: !answerText,
+    };
+  });
+}
+
+function trimQuestionNoise(parts: string[]): string[] {
+  const questionStart = parts.findIndex((line) => (
+    /[?؟]$/.test(line) ||
+    /^(what|which|why|how|given|in\s+the|the\s+|a\s+|an\s+|developer|according|cording)\b/i.test(line)
+  ));
+  return (questionStart >= 0 ? parts.slice(questionStart) : parts)
+    .filter((line) => !/^(IT\d+|Data Structure|Module \d+|Algorithm Design Techniques)/i.test(line));
+}
+
+function resolveChoiceAnswer(answer: string | null, choices: string[]): string {
+  if (!answer) return "";
+  const letter = answer.match(/^[A-D]/i)?.[0]?.toUpperCase();
+  if (letter) return choices.find(choice => choice.startsWith(`${letter})`)) ?? answer;
+  return choices.find(choice => choice.replace(/^[A-D]\)\s*/, "").trim().toLowerCase() === answer.toLowerCase()) ?? answer;
 }
 
 function finalize(cur: { num: number; parts: string[]; choices: string[]; selected: string | null; page: number }): ProcessedPair {

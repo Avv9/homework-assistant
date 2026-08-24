@@ -4,6 +4,21 @@ import { getAdminRepo } from "@/lib/repo";
 import { config } from "@/lib/config";
 import { isPdfBuffer, processPdfFile } from "@/lib/pdf-pipeline";
 
+function safeStorageFileName(fileName: string) {
+  const cleaned = fileName
+    .normalize("NFKD")
+    .replace(/[\\/]+/g, "_")
+    .replace(/[^\p{L}\p{N}._ -]+/gu, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return cleaned || "upload.pdf";
+}
+
+function uploadError(error: string, status = 400, details?: Record<string, unknown>) {
+  return NextResponse.json({ error, details }, { status });
+}
+
 export async function GET(req: NextRequest) {
   const guard = await requireAdmin("viewer");
   if (!guard.ok) return guard.response;
@@ -86,8 +101,92 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(created, { status: 201 });
   }
 
-  // ── JSON metadata-only path (used by demo admin UI) ───────────────────────
+  // ── JSON paths: direct-to-storage upload and demo metadata upload ─────────
   const body = await req.json();
+  if (body.action === "create_signed_upload") {
+    const { fileName, sizeBytes, courseId, assignmentId } = body;
+    if (!fileName || !courseId || !assignmentId || !Number.isFinite(Number(sizeBytes))) {
+      return uploadError("invalid_request");
+    }
+    if (!String(fileName).toLowerCase().endsWith(".pdf")) {
+      return uploadError("invalid_type", 400, { fileName });
+    }
+    if (Number(sizeBytes) > config.maxUploadSizeMb * 1024 * 1024) {
+      return uploadError("file_too_large", 400, { fileName, maxUploadSizeMb: config.maxUploadSizeMb });
+    }
+    if (config.isDemoMode || !config.supabaseUrl || !config.supabaseServiceRoleKey) {
+      return uploadError("direct_upload_unavailable", 503);
+    }
+
+    const { createServiceClient } = await import("@/lib/supabase/server");
+    const sb = await createServiceClient();
+    const safeName = safeStorageFileName(String(fileName));
+    const storagePath = `course-files/${courseId}/${assignmentId}/${Date.now()}_${crypto.randomUUID()}_${safeName}`;
+    const { data, error } = await sb.storage.from("course-files").createSignedUploadUrl(storagePath, { upsert: false });
+    if (error || !data) {
+      return uploadError("signed_upload_error", 500, { message: error?.message });
+    }
+    return NextResponse.json({
+      bucket: "course-files",
+      storagePath,
+      signedUrl: data.signedUrl,
+      token: data.token,
+      fileName: String(fileName),
+    });
+  }
+
+  if (body.action === "finalize_signed_upload") {
+    const { fileName, sizeBytes, courseId, assignmentId, storagePath } = body;
+    if (!fileName || !courseId || !assignmentId || !storagePath || !Number.isFinite(Number(sizeBytes))) {
+      return uploadError("invalid_request");
+    }
+    if (!String(fileName).toLowerCase().endsWith(".pdf")) {
+      return uploadError("invalid_type", 400, { fileName });
+    }
+    if (config.isDemoMode || !config.supabaseUrl || !config.supabaseServiceRoleKey) {
+      return uploadError("direct_upload_unavailable", 503);
+    }
+
+    const repo = await getAdminRepo();
+    const record = await repo.createFile({
+      courseId,
+      assignmentId,
+      storagePath,
+      fileName: String(fileName),
+      sizeBytes: Number(sizeBytes),
+      status: "uploaded",
+    });
+    await repo.addAuditEntry({
+      adminId: guard.admin.id,
+      adminEmail: guard.admin.email,
+      action: "upload_file",
+      entityType: "source_file",
+      entityId: record.id,
+      metadata: { fileName, sizeBytes, uploadMode: "signed" },
+    });
+
+    const { createServiceClient } = await import("@/lib/supabase/server");
+    const sb = await createServiceClient();
+    sb.storage.from("course-files").download(storagePath)
+      .then(async ({ data: dl, error }) => {
+        if (error || !dl) {
+          await repo.updateFile(record.id, { status: "failed", processingError: `storage_download_error: ${error?.message ?? "file not found"}` });
+          return;
+        }
+        const buf = Buffer.from(await dl.arrayBuffer());
+        if (!isPdfBuffer(buf)) {
+          await repo.updateFile(record.id, { status: "failed", processingError: "not_a_pdf" });
+          return;
+        }
+        await processPdfFile({ fileId: record.id, buf, fileName: String(fileName), courseId, assignmentId, locale: (body.locale as "ar" | "en") ?? "en", repo });
+      })
+      .catch(async (e) => {
+        await repo.updateFile(record.id, { status: "failed", processingError: e instanceof Error ? e.message : String(e) });
+      });
+
+    return NextResponse.json(record, { status: 201 });
+  }
+
   const { fileName, sizeBytes, courseId, assignmentId } = body;
   if (!fileName || !courseId || !assignmentId) {
     return NextResponse.json({ error: "invalid_request" }, { status: 400 });
