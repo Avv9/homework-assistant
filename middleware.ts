@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 
 const PUBLIC_ADMIN_PATHS = ["/admin/login"];
 
+function isSupabaseAuthCookie(name: string) {
+  return name.startsWith("sb-") && (name.endsWith("-auth-token") || /-auth-token\.\d+$/.test(name));
+}
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -9,7 +13,7 @@ export function middleware(req: NextRequest) {
   if (PUBLIC_ADMIN_PATHS.some((p) => pathname.startsWith(p))) return NextResponse.next();
 
   const hasDemoSession = req.cookies.get("haa_admin_session");
-  const hasSupabaseSession = req.cookies.getAll().some((c) => c.name.startsWith("sb-") && c.name.endsWith("-auth-token"));
+  const hasSupabaseSession = req.cookies.getAll().some((c) => isSupabaseAuthCookie(c.name));
 
   if (!hasDemoSession && !hasSupabaseSession) {
     const url = req.nextUrl.clone();
