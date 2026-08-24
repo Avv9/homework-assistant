@@ -5,14 +5,17 @@ import { config } from "@/lib/config";
 import { isPdfBuffer, processPdfFile } from "@/lib/pdf-pipeline";
 
 function safeStorageFileName(fileName: string) {
-  const cleaned = fileName
+  const extension = fileName.toLowerCase().endsWith(".pdf") ? ".pdf" : "";
+  const baseName = extension ? fileName.slice(0, -extension.length) : fileName;
+  const cleanedBase = baseName
     .normalize("NFKD")
     .replace(/[\\/]+/g, "_")
-    .replace(/[^\p{L}\p{N}._ -]+/gu, "_")
+    .replace(/[^a-zA-Z0-9._ -]+/g, "_")
     .replace(/\s+/g, "_")
     .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return cleaned || "upload.pdf";
+    .replace(/^_+|_+$/g, "")
+    .replace(/^\.+|\.+$/g, "");
+  return `${cleanedBase || "upload"}${extension}`;
 }
 
 function uploadError(error: string, status = 400, details?: Record<string, unknown>) {
