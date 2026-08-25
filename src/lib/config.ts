@@ -1,3 +1,12 @@
+function numberEnv(name: string, fallback: number) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function minimumNumberEnv(name: string, fallback: number, minimum = fallback) {
+  return Math.max(minimum, numberEnv(name, fallback));
+}
+
 export const config = {
   isDemoMode: process.env.DEMO_MODE === "true",
   supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
@@ -28,8 +37,8 @@ export const config = {
 
   // ── Limits ───────────────────────────────────────────────────────────────
   maxUploadSizeMb: Number(process.env.MAX_UPLOAD_SIZE_MB ?? 50),
-  maxPdfPages: Number(process.env.MAX_PDF_PAGES ?? 100),
-  maxOcrPages: Number(process.env.MAX_OCR_PAGES ?? 12),
+  maxPdfPages: minimumNumberEnv("MAX_PDF_PAGES", 100),
+  maxOcrPages: minimumNumberEnv("MAX_OCR_PAGES", 12),
   maxQuestionsPerRequest: Number(process.env.MAX_QUESTIONS_PER_REQUEST ?? 10),
   rateLimitCount: Number(process.env.RATE_LIMIT_COUNT ?? 20),
   rateLimitWindowSeconds: Number(process.env.RATE_LIMIT_WINDOW_SECONDS ?? 600),
