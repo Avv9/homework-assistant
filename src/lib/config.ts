@@ -28,8 +28,8 @@ export const config = {
 
   // ── Limits ───────────────────────────────────────────────────────────────
   maxUploadSizeMb: Number(process.env.MAX_UPLOAD_SIZE_MB ?? 50),
-  maxPdfPages: Number(process.env.MAX_PDF_PAGES ?? 50),
-  maxOcrPages: Number(process.env.MAX_OCR_PAGES ?? 8),
+  maxPdfPages: Number(process.env.MAX_PDF_PAGES ?? 100),
+  maxOcrPages: Number(process.env.MAX_OCR_PAGES ?? 12),
   maxQuestionsPerRequest: Number(process.env.MAX_QUESTIONS_PER_REQUEST ?? 10),
   rateLimitCount: Number(process.env.RATE_LIMIT_COUNT ?? 20),
   rateLimitWindowSeconds: Number(process.env.RATE_LIMIT_WINDOW_SECONDS ?? 600),
