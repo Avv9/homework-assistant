@@ -70,9 +70,6 @@
     "login": {
       "title": "Admin Login",
       "subtitle": "Enter your credentials once; if your session is still active, we will open admin immediately.",
-      "heroTitle": "Fast, secure admin portal",
-      "heroSubtitle": "Open files, assignments, and extracted-question review from a clear entry point without typing /admin manually every time.",
-      "badge": "Admin entry",
       "email": "Email",
       "password": "Password",
       "submit": "Sign in",
@@ -82,12 +79,7 @@
       "backHome": "Back to home",
       "error": "Invalid email or password.",
       "notAdmin": "This account signed in, but it is not an active admin in the system.",
-      "verificationUnavailable": "Could not verify admin permissions. Check the Supabase service role settings.",
-      "features": {
-        "fast": { "title": "Faster access", "desc": "Checks your session and opens admin directly." },
-        "secure": { "title": "Clear permissions", "desc": "Only active admin accounts can enter." },
-        "return": { "title": "Return to context", "desc": "After login, you go back to the page you tried to open." }
-      }
+      "verificationUnavailable": "Could not verify admin permissions. Check the Supabase service role settings."
     },
     "logout": "Logout",
     "dashboard": "Dashboard",
