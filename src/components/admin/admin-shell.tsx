@@ -37,8 +37,8 @@ export function AdminShell({ children, email }: { children: React.ReactNode; ema
   const router = useRouter();
 
   const logout = async () => {
-    await fetch("/api/admin/auth/logout", { method: "POST" });
-    router.push("/admin/login");
+    await fetch("/api/admin/auth/logout", { method: "POST", credentials: "same-origin" });
+    router.replace("/admin/login");
     router.refresh();
   };
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { config } from "@/lib/config";
-import { buildDemoSessionCookieValue, DEMO_ADMIN_COOKIE_NAME } from "@/lib/admin-auth";
+import { buildDemoSessionCookieValue, DEMO_ADMIN_COOKIE_NAME, getAdminByUserId } from "@/lib/admin-auth";
 
 const schema = z.object({ email: z.string().email(), password: z.string().min(1) });
 
@@ -13,14 +13,29 @@ export async function POST(req: NextRequest) {
   }
   const { email, password } = parsed.data;
 
-  if (config.supabaseUrl) {
+  if (!config.isDemoMode && config.supabaseUrl) {
     const { createClient } = await import("@/lib/supabase/server");
     const supabase = await createClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
       return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
     }
-    return NextResponse.json({ ok: true });
+
+    if (!data.user?.id || !config.supabaseServiceRoleKey) {
+      await supabase.auth.signOut();
+      return NextResponse.json({ error: "admin_verification_unavailable" }, { status: 500 });
+    }
+
+    const admin = await getAdminByUserId(data.user.id);
+    if (!admin) {
+      await supabase.auth.signOut();
+      return NextResponse.json({ error: "not_admin" }, { status: 403 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      admin: { email: admin.email, fullName: admin.fullName, role: admin.role },
+    });
   }
 
   // Demo-mode admin auth, configured via ADMIN_EMAIL / ADMIN_PASSWORD env vars.
@@ -31,7 +46,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
   }
 
-  const res = NextResponse.json({ ok: true });
+  const res = NextResponse.json({ ok: true, admin: { email, role: "owner" } });
   res.cookies.set(DEMO_ADMIN_COOKIE_NAME, buildDemoSessionCookieValue(email), {
     httpOnly: true,
     sameSite: "lax",

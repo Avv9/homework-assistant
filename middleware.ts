@@ -18,7 +18,7 @@ export function middleware(req: NextRequest) {
   if (!hasDemoSession && !hasSupabaseSession) {
     const url = req.nextUrl.clone();
     url.pathname = "/admin/login";
-    url.searchParams.set("redirectedFrom", pathname);
+    url.searchParams.set("redirectedFrom", `${pathname}${req.nextUrl.search}`);
     return NextResponse.redirect(url);
   }
 

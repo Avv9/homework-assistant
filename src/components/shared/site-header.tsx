@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { GraduationCap } from "lucide-react";
+import { GraduationCap, ShieldCheck } from "lucide-react";
 import { useLocale } from "@/lib/i18n/locale-provider";
 import { LanguageSwitcher } from "./language-switcher";
 import { ThemeToggle } from "./theme-toggle";
@@ -18,6 +18,14 @@ export function SiteHeader() {
           <span className="hidden text-base sm:inline">{t("app.name")}</span>
         </Link>
         <div className="flex items-center gap-2">
+          <Link
+            href="/admin"
+            aria-label={t("nav.admin")}
+            className="inline-flex h-10 items-center gap-2 rounded-full border border-border bg-muted/40 px-3 text-sm font-medium text-muted-foreground transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:bg-primary/10 hover:text-primary"
+          >
+            <ShieldCheck size={16} />
+            <span className="hidden sm:inline">{t("nav.admin")}</span>
+          </Link>
           <LanguageSwitcher />
           <ThemeToggle />
         </div>

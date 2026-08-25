@@ -67,7 +67,28 @@
   },
   "notFound": { "title": "Page not found", "desc": "The page you are looking for does not exist.", "back": "Back to Home" },
   "admin": {
-    "login": { "title": "Admin Login", "email": "Email", "password": "Password", "submit": "Sign in", "error": "Invalid email or password." },
+    "login": {
+      "title": "Admin Login",
+      "subtitle": "Enter your credentials once; if your session is still active, we will open admin immediately.",
+      "heroTitle": "Fast, secure admin portal",
+      "heroSubtitle": "Open files, assignments, and extracted-question review from a clear entry point without typing /admin manually every time.",
+      "badge": "Admin entry",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "signingIn": "Signing in...",
+      "checking": "Checking your current session...",
+      "sessionHint": "If you are already signed in, the admin dashboard opens automatically.",
+      "backHome": "Back to home",
+      "error": "Invalid email or password.",
+      "notAdmin": "This account signed in, but it is not an active admin in the system.",
+      "verificationUnavailable": "Could not verify admin permissions. Check the Supabase service role settings.",
+      "features": {
+        "fast": { "title": "Faster access", "desc": "Checks your session and opens admin directly." },
+        "secure": { "title": "Clear permissions", "desc": "Only active admin accounts can enter." },
+        "return": { "title": "Return to context", "desc": "After login, you go back to the page you tried to open." }
+      }
+    },
     "logout": "Logout",
     "dashboard": "Dashboard",
     "stats": { "courses": "Courses", "assignments": "Assignments", "files": "Uploaded Files", "approved": "Approved Questions", "pendingAi": "AI Answers Pending Review" },
