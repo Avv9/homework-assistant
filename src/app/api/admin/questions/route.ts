@@ -15,6 +15,25 @@ export async function PATCH(req: NextRequest) {
   if (!guard.ok) return guard.response;
   const body = await req.json();
   const repo = await getAdminRepo();
+  if (Array.isArray(body.publishQuestionIds)) {
+    const ids = body.publishQuestionIds
+      .filter((id: unknown): id is string => typeof id === "string" && id.length > 0)
+      .slice(0, 500);
+
+    for (const id of ids) {
+      await repo.updateExtractedQuestion(id, { published: true });
+    }
+
+    await repo.addAuditEntry({
+      adminId: guard.admin.id,
+      adminEmail: guard.admin.email,
+      action: "publish_selected_questions",
+      entityType: "extracted_question",
+      metadata: { count: ids.length },
+    });
+    return NextResponse.json({ ok: true, count: ids.length });
+  }
+
   if (body.publishAllForFile) {
     await repo.publishQuestionsForFile(body.publishAllForFile);
     await repo.addAuditEntry({ adminId: guard.admin.id, adminEmail: guard.admin.email, action: "publish_all", entityType: "source_file", entityId: body.publishAllForFile });
