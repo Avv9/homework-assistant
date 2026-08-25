@@ -279,7 +279,19 @@ export async function DELETE(req: NextRequest) {
   if (!guard.ok) return guard.response;
   const id = req.nextUrl.searchParams.get("id") ?? "";
   const repo = await getAdminRepo();
+  const file = await getFileById(repo, id);
+  if (!file) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  const questions = await repo.getExtractedQuestions({ sourceFileId: id });
   await repo.deleteFile(id);
-  await repo.addAuditEntry({ adminId: guard.admin.id, adminEmail: guard.admin.email, action: "delete_file", entityType: "source_file", entityId: id });
-  return NextResponse.json({ ok: true });
+  await repo.addAuditEntry({
+    adminId: guard.admin.id,
+    adminEmail: guard.admin.email,
+    action: "delete_file",
+    entityType: "source_file",
+    entityId: id,
+    metadata: { fileName: file.fileName, deletedQuestions: questions.length },
+  });
+  return NextResponse.json({ ok: true, deletedQuestions: questions.length });
 }

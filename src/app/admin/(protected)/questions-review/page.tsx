@@ -162,6 +162,7 @@ export default function QuestionsReviewPage() {
   const [drafts, setDrafts] = useState<DraftMap>({});
   const [message, setMessage] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
+  const [deleteGroupConfirm, setDeleteGroupConfirm] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   const reload = async () => {
@@ -199,6 +200,9 @@ export default function QuestionsReviewPage() {
 
   const groups = useMemo<FileGroup[]>(() => {
     const grouped = new Map<string, ExtractedQuestion[]>();
+    for (const file of files) {
+      grouped.set(file.id, []);
+    }
     for (const question of questions) {
       const key = question.sourceFileId || ORPHAN_GROUP_KEY;
       grouped.set(key, [...(grouped.get(key) ?? []), question]);
@@ -234,7 +238,7 @@ export default function QuestionsReviewPage() {
       if (a.stats.needsWork !== b.stats.needsWork) return b.stats.needsWork - a.stats.needsWork;
       return (new Date(b.file?.uploadedAt ?? 0).getTime()) - (new Date(a.file?.uploadedAt ?? 0).getTime());
     });
-  }, [drafts, fileById, isAr, locale, questions]);
+  }, [drafts, fileById, files, isAr, locale, questions]);
 
   const activeGroup = useMemo(
     () => groups.find(group => group.key === activeGroupKey) ?? null,
@@ -271,6 +275,7 @@ export default function QuestionsReviewPage() {
   const selectGroup = (key: string) => {
     setActiveGroupKey(key);
     setDeleteCandidateId(null);
+    setDeleteGroupConfirm(false);
     setMessage(null);
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
@@ -386,6 +391,41 @@ export default function QuestionsReviewPage() {
     );
   };
 
+  const deleteActiveGroup = async () => {
+    if (!activeGroup || (!activeGroup.file && activeGroup.questions.length === 0)) return;
+    setBusy("delete-group");
+    let successMessage = "";
+    try {
+      if (activeGroup.file) {
+        const res = await fetch(`/api/admin/files?id=${encodeURIComponent(activeGroup.file.id)}`, { method: "DELETE" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(isAr ? "تعذر حذف الملف." : "Could not delete file.");
+        successMessage = isAr
+          ? `تم حذف الملف ومعه ${data.deletedQuestions ?? activeGroup.questions.length} سؤال/أسئلة.`
+          : `Deleted the file and ${data.deletedQuestions ?? activeGroup.questions.length} question(s).`;
+      } else {
+        const res = await fetch("/api/admin/questions", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deleteQuestionIds: activeGroup.questions.map(question => question.id) }),
+        });
+        if (!res.ok) throw new Error(isAr ? "تعذر حذف مجموعة الأسئلة." : "Could not delete question group.");
+        successMessage = isAr
+          ? `تم حذف ${activeGroup.questions.length} سؤال/أسئلة بدون ملف معروف.`
+          : `Deleted ${activeGroup.questions.length} question(s) without a known file.`;
+      }
+
+      setDeleteGroupConfirm(false);
+      selectGroup(ALL_GROUP_KEY);
+      await reload();
+      setMessage(successMessage);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : (isAr ? "حدث خطأ أثناء الحذف." : "Delete failed."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const reprocessActiveFile = async () => {
     if (!activeGroup?.file) return;
     setBusy("reprocess");
@@ -465,8 +505,40 @@ export default function QuestionsReviewPage() {
               <Button size="sm" variant="outline" onClick={() => void reprocessActiveFile()} disabled={!activeGroup?.file || busy !== null}>
                 <RotateCcw size={14} /> {isAr ? "إعادة معالجة" : "Reprocess"}
               </Button>
+              <Button size="sm" variant="destructive" onClick={() => setDeleteGroupConfirm(true)} disabled={!activeGroup || (!activeGroup.file && activeGroup.questions.length === 0) || busy !== null}>
+                <Trash2 size={14} /> {activeGroup?.file ? (isAr ? "حذف الملف كامل" : "Delete file") : (isAr ? "حذف المجموعة" : "Delete group")}
+              </Button>
             </div>
           </div>
+
+          {deleteGroupConfirm && activeGroup && (
+            <Alert variant="destructive" className="space-y-3">
+              <div>
+                <p className="font-semibold">
+                  {activeGroup.file
+                    ? (isAr ? "تأكيد حذف الملف كامل" : "Confirm full file deletion")
+                    : (isAr ? "تأكيد حذف مجموعة الأسئلة" : "Confirm question group deletion")}
+                </p>
+                <p className="mt-1">
+                  {activeGroup.file
+                    ? (isAr
+                      ? `سيتم حذف ملف "${activeGroup.title}" ومعه ${activeGroup.questions.length} سؤال/أسئلة مستخرجة. لا يمكن التراجع من داخل الموقع.`
+                      : `This will delete "${activeGroup.title}" and its ${activeGroup.questions.length} extracted question(s). This cannot be undone inside the site.`)
+                    : (isAr
+                      ? `سيتم حذف ${activeGroup.questions.length} سؤال/أسئلة من هذه المجموعة. لا يوجد ملف أصلي مرتبط بها.`
+                      : `This will delete ${activeGroup.questions.length} question(s) from this group. There is no source file attached to it.`)}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="destructive" onClick={() => void deleteActiveGroup()} disabled={busy !== null}>
+                  <Trash2 size={14} /> {activeGroup.file ? (isAr ? "نعم، احذف الملف والأسئلة" : "Yes, delete file and questions") : (isAr ? "نعم، احذف الأسئلة" : "Yes, delete questions")}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setDeleteGroupConfirm(false)} disabled={busy !== null}>
+                  <X size={14} /> {t("common.cancel")}
+                </Button>
+              </div>
+            </Alert>
+          )}
 
           <div className="grid gap-3 sm:grid-cols-4">
             <MetricCard label={isAr ? "الإجمالي" : "Total"} value={scopedStats.total} />

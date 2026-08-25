@@ -34,6 +34,25 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ ok: true, count: ids.length });
   }
 
+  if (Array.isArray(body.deleteQuestionIds)) {
+    const ids = body.deleteQuestionIds
+      .filter((id: unknown): id is string => typeof id === "string" && id.length > 0)
+      .slice(0, 500);
+
+    for (const id of ids) {
+      await repo.deleteExtractedQuestion(id);
+    }
+
+    await repo.addAuditEntry({
+      adminId: guard.admin.id,
+      adminEmail: guard.admin.email,
+      action: "delete_selected_questions",
+      entityType: "extracted_question",
+      metadata: { count: ids.length },
+    });
+    return NextResponse.json({ ok: true, count: ids.length });
+  }
+
   if (body.publishAllForFile) {
     await repo.publishQuestionsForFile(body.publishAllForFile);
     await repo.addAuditEntry({ adminId: guard.admin.id, adminEmail: guard.admin.email, action: "publish_all", entityType: "source_file", entityId: body.publishAllForFile });

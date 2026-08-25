@@ -305,6 +305,8 @@ export class SupabaseRepo implements AdminRepo {
   async deleteFile(id: string): Promise<void> {
     // get storage path first
     const { data: f } = await this.db.from("source_files").select("storage_path").eq("id", id).single();
+    const { error: questionsError } = await this.db.from("extracted_questions").delete().eq("source_file_id", id);
+    if (questionsError) err("deleteFile:questions", questionsError);
     if (f?.storage_path) await this.db.storage.from("course-files").remove([f.storage_path]);
     const { error } = await this.db.from("source_files").delete().eq("id", id);
     if (error) err("deleteFile", error);
