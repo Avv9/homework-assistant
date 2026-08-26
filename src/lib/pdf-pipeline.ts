@@ -54,6 +54,169 @@ export function isPdfBuffer(buf: Buffer): boolean {
   return buf.length > 4 && buf.slice(0, 4).toString("binary") === "%PDF";
 }
 
+// ─── Q/A cleanup ─────────────────────────────────────────────────────────────
+
+const OPTION_PREFIX = /^([A-Ha-h])\s*[.)]\s*(.+)$/;
+const OPTION_MARKER = /(?:^|\s)([A-Ha-h])\s*[.)]\s+/g;
+const ANSWER_DIRECTIVE = /(?:^|\n|\s)(?:correct\s+answer|selected\s+answer|answer)\s*[:\-]\s*([^\n]+)/i;
+const ANSWER_DIRECTIVE_GLOBAL = /(?:^|\n|\s)(?:correct\s+answer|selected\s+answer|answer)\s*[:\-]\s*[^\n]+/gi;
+const SELECTED_BOOLEAN_SUFFIX = /^(.*?)[\s"'’‘“”]*(?:[®©●◉○◯◎◌✓✔☑]|\(\s*[xX✓✔]\s*\))\s*(True|False)\s*["'’‘“”]*$/i;
+const BOOLEAN_SELECTED_SUFFIX = /^(.*?)(True|False)\s+Selected\s*$/i;
+
+function compactText(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function canonicalBoolean(value: string): string {
+  return /^true$/i.test(value) ? "True" : /^false$/i.test(value) ? "False" : value;
+}
+
+function stripChoicePrefix(value: string): string {
+  const clean = compactText(value)
+    .replace(/^[®©●◉○◯◎◌✓✔☑]+\s*/, "")
+    .replace(/\s+Selected$/i, "");
+  const option = clean.match(OPTION_PREFIX);
+  return compactText(option ? option[2] : clean);
+}
+
+function choiceLetter(value: string): string | null {
+  return value.trim().match(/^([A-Ha-h])\s*[.)]/)?.[1]?.toUpperCase() ?? null;
+}
+
+function resolveAnswerText(answer: string | null | undefined, choices: string[]): string {
+  if (!answer) return "";
+
+  let clean = compactText(answer)
+    .replace(/^[®©●◉○◯◎◌✓✔☑]+\s*/, "")
+    .replace(/\s+Selected$/i, "")
+    .replace(/^(?:correct\s+answer|selected\s+answer|answer)\s*[:\-]\s*/i, "")
+    .trim();
+
+  const parenthesized = clean.match(/^([A-Ha-h])\s*\(([^)]+)\)$/);
+  if (parenthesized) return canonicalBoolean(stripChoicePrefix(parenthesized[2]));
+
+  const labelled = clean.match(OPTION_PREFIX);
+  if (labelled) return canonicalBoolean(stripChoicePrefix(labelled[2]));
+
+  const exactLetter = clean.match(/^([A-Ha-h])$/)?.[1]?.toUpperCase();
+  if (exactLetter) {
+    const letterIndex = exactLetter.charCodeAt(0) - "A".charCodeAt(0);
+    const choice = choices.find((item) => choiceLetter(item) === exactLetter) ?? choices[letterIndex];
+    return choice ? canonicalBoolean(stripChoicePrefix(choice)) : "";
+  }
+
+  const matchingChoice = choices.find((choice) => {
+    const bareChoice = stripChoicePrefix(choice).toLowerCase();
+    return bareChoice === clean.toLowerCase() || compactText(choice).toLowerCase() === clean.toLowerCase();
+  });
+  if (matchingChoice) clean = stripChoicePrefix(matchingChoice);
+
+  return canonicalBoolean(stripChoicePrefix(clean));
+}
+
+function extractAnswerDirective(value: string): string | null {
+  const match = value.match(ANSWER_DIRECTIVE);
+  return match?.[1]?.trim() ?? null;
+}
+
+function removeAnswerDirectives(value: string): string {
+  return compactText(value.replace(ANSWER_DIRECTIVE_GLOBAL, " "));
+}
+
+function extractTrailingAnswer(value: string): { questionText: string; answerText: string } | null {
+  const selectedBoolean = value.match(SELECTED_BOOLEAN_SUFFIX);
+  if (selectedBoolean?.[1] && selectedBoolean[2]) {
+    return {
+      questionText: compactText(selectedBoolean[1]).replace(/["'’‘“”]+$/g, "").trim(),
+      answerText: canonicalBoolean(selectedBoolean[2]),
+    };
+  }
+
+  const booleanSelected = value.match(BOOLEAN_SELECTED_SUFFIX);
+  if (booleanSelected?.[1] && booleanSelected[2]) {
+    return {
+      questionText: compactText(booleanSelected[1]).replace(/["'’‘“”]+$/g, "").trim(),
+      answerText: canonicalBoolean(booleanSelected[2]),
+    };
+  }
+
+  return null;
+}
+
+function splitInlineChoices(value: string): { questionText: string; choices: string[] } {
+  const matches = Array.from(value.matchAll(OPTION_MARKER));
+  if (matches.length < 2 || matches[0].index === undefined) return { questionText: value, choices: [] };
+
+  const firstChoiceIndex = matches[0].index + (matches[0][0].startsWith(" ") ? 1 : 0);
+  const choices = matches.map((match, idx) => {
+    const start = (match.index ?? 0) + (match[0].startsWith(" ") ? 1 : 0);
+    const end = idx + 1 < matches.length && matches[idx + 1].index !== undefined
+      ? matches[idx + 1].index
+      : value.length;
+    return compactText(value.slice(start, end)).replace(ANSWER_DIRECTIVE_GLOBAL, "").trim();
+  }).filter((choice) => choice.length > 2);
+
+  return {
+    questionText: compactText(value.slice(0, firstChoiceIndex)),
+    choices,
+  };
+}
+
+function cleanQuestionText(value: string): string {
+  return compactText(value)
+    .replace(/--\s*\d+\s*of\s*\d+\s*--/gi, " ")
+    .replace(/^(?:Question|السؤال)\s*#?\s*\d+\s*[:.)-]?\s*/i, "")
+    .replace(/\b\d+(?:\.\d+)?\s+Points?\b/gi, " ")
+    .replace(/\bClear selection\b/gi, " ")
+    .replace(/\s+Selected\b/gi, " ")
+    .replace(/[®©●◉○◯◎◌✓✔☑]+\s*$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+export function normalizeProcessedPair(pair: ProcessedPair): ProcessedPair {
+  const originalQuestionText = compactText(pair.questionText);
+  const directiveAnswer = extractAnswerDirective(originalQuestionText) ?? extractAnswerDirective(pair.answerText);
+  const withoutAnswerDirective = removeAnswerDirectives(originalQuestionText);
+  const inline = splitInlineChoices(withoutAnswerDirective);
+  const choices = Array.from(new Map(
+    [...pair.choices, ...inline.choices]
+      .map((choice) => compactText(choice))
+      .map((choice) => removeAnswerDirectives(choice).replace(/\s+Selected$/i, "").trim())
+      .filter(Boolean)
+      .map((choice) => [choice.toLowerCase(), choice]),
+  ).values());
+
+  const trailingAnswer = extractTrailingAnswer(inline.questionText);
+  const questionText = cleanQuestionText(trailingAnswer?.questionText ?? inline.questionText);
+  const candidateAnswers = [
+    trailingAnswer?.answerText,
+    directiveAnswer,
+    pair.answerText,
+    pair.selectedAnswer,
+  ];
+  const answerText = candidateAnswers.map((answer) => resolveAnswerText(answer, choices)).find(Boolean) ?? "";
+  const hadAnswerSignal = Boolean(trailingAnswer?.answerText || directiveAnswer || pair.answerText || pair.selectedAnswer);
+  const needsReview = !answerText;
+  const confidence = answerText
+    ? Math.max(pair.confidence, trailingAnswer?.answerText ? 0.76 : pair.confidence)
+    : Math.min(pair.confidence, hadAnswerSignal ? 0.45 : 0.5);
+
+  return {
+    ...pair,
+    questionText,
+    choices,
+    selectedAnswer: answerText || null,
+    answerText,
+    confidence,
+    needsReview,
+  };
+}
+
 // ─── pdf-parse init ───────────────────────────────────────────────────────────
 
 let _pdfInit: Promise<typeof import("pdf-parse")["PDFParse"]> | null = null;
@@ -264,6 +427,9 @@ Schema per element:
 }
 
 Rules:
+- Put the prompt/question ONLY in questionText. Do not include selected-answer markers, "Answer:" lines, or option letters inside questionText.
+- If the selected answer is a letter such as A/B/C/D, resolve it to the full choice text. Never put only the letter in answerText.
+- For true/false questions, answerText must be exactly "True" or "False".
 - Filled radio (●) or row highlighted or "Selected" label → selectedAnswer.
 - No answer selected → selectedAnswer: null, needsReview: true.
 - No question on this image → return [].
@@ -366,7 +532,12 @@ Content:
 ${rawText.slice(0, 12000)}
 ---
 Return ONLY a JSON array. Each element: { "questionNumber": number, "questionText": string, "choices": [string], "selectedAnswer": string|null, "answerText": string, "pageNumber": number, "confidence": number, "needsReview": boolean }
-Set needsReview: true if answerText is empty. Respond in ${lang}. Return valid JSON array only.`;
+Rules:
+- questionText must contain the question only. Do not include "Answer:" lines, selected markers, or the correct option at the end of the question.
+- answerText must be the full answer text, never only A/B/C/D. If the source gives a letter, resolve it from choices.
+- For true/false questions, answerText must be exactly "True" or "False".
+- Set needsReview: true if answerText is empty.
+Respond in ${lang}. Return valid JSON array only.`;
 
   try {
     let raw = "";
@@ -408,39 +579,38 @@ function splitTextFallback(text: string): ProcessedPair[] {
       const qNum = parseInt(m[0], 10);
       const block = m[1].trim();
       // Extract answer: "Answer: B (False)", "Answer: A", or "Answer: True"
-      const answerMatch = block.match(/^Answer:\s*([A-D])(?:\s*\(([^)]+)\))?\s*$/im);
+      const answerMatch = block.match(/^Answer:\s*([A-H])(?:\s*\(([^)]+)\))?\s*$/im);
       const textAnswerMatch = block.match(/^Answer:\s*(True|False)\s*$/im);
       const answerLetter = answerMatch?.[1]?.toUpperCase() ?? null;
       const answerFull = answerMatch?.[2] ?? textAnswerMatch?.[1] ?? answerLetter ?? null;
       // Remove answer line from block to get question + choices
-      const withoutAnswer = block.replace(/^Answer:\s*(?:[A-D].*|True|False)\s*$/gim, "").trim();
+      const withoutAnswer = block.replace(/^Answer:\s*(?:[A-H].*|True|False)\s*$/gim, "").trim();
       const blockLines = withoutAnswer.split(/\n+/).map(line => line.trim()).filter(Boolean);
-      const firstChoiceLineIdx = blockLines.findIndex(line => /^[A-D]\)\s*/.test(line));
+      const firstChoiceLineIdx = blockLines.findIndex(line => /^[A-H]\)\s*/.test(line));
       const choices = firstChoiceLineIdx >= 0
-        ? blockLines.slice(firstChoiceLineIdx).filter(line => /^[A-D]\)\s*/.test(line))
-        : (withoutAnswer.match(/(?:^|\s)([A-D]\)\s+.*?)(?=\s+[A-D]\)\s+|$)/g) ?? []).map(c => c.trim());
+        ? blockLines.slice(firstChoiceLineIdx).filter(line => /^[A-H]\)\s*/.test(line))
+        : (withoutAnswer.match(/(?:^|\s)([A-H]\)\s+.*?)(?=\s+[A-H]\)\s+|$)/g) ?? []).map(c => c.trim());
       const questionText = firstChoiceLineIdx >= 0
         ? blockLines.slice(0, firstChoiceLineIdx).join("\n").trim()
-        : withoutAnswer.replace(/(?:^|\s)[A-D]\)\s+.*?(?=\s+[A-D]\)\s+|$)/g, "").trim();
-      const selectedChoice = answerLetter
-        ? choices.find(c => c.startsWith(answerLetter)) ?? answerFull ?? ""
-        : answerFull
-          ? choices.find(c => c.replace(/^[A-D]\)\s*/, "").trim().toLowerCase() === answerFull.toLowerCase()) ?? answerFull
-          : "";
+        : withoutAnswer.replace(/(?:^|\s)[A-H]\)\s+.*?(?=\s+[A-H]\)\s+|$)/g, "").trim();
+      const selectedChoice = resolveAnswerText(answerFull, choices);
       pairs.push({
         questionNumber: qNum, questionText, choices,
-        selectedAnswer: selectedChoice || null, answerText: selectedChoice || answerFull || "",
-        pageNumber: 1, confidence: answerFull ? 0.88 : 0.6, needsReview: !answerFull,
+        selectedAnswer: selectedChoice || null, answerText: selectedChoice,
+        pageNumber: 1, confidence: selectedChoice ? 0.88 : 0.6, needsReview: !selectedChoice,
       });
     }
     if (pairs.length > 0) return pairs;
   }
 
+  const blackboardInline = splitBlackboardInlineFallback(text);
+  if (blackboardInline.length > 1) return blackboardInline;
+
   const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const choiceBlocks = splitChoiceBlocksFallback(lines);
   if (choiceBlocks.length > 1) return choiceBlocks;
 
-  const bbPattern = /^Question\s+(\d+)/i;
+  const bbPattern = /^Question\s*(\d+)/i;
   const selectedSuffix = /\s*Selected\s*$/i;
   const radioPrefix = /^[\(©OoO○●\u00A9\u25CB\u25CF]+\s*/;
   const skipPatterns = [/^\d+(\.\d+)?\s+Points?$/i, /^-- \d+ of \d+ --$/, /^Clear selection$/i, /^Page \d+ of \d+/i];
@@ -481,8 +651,40 @@ function splitTextFallback(text: string): ProcessedPair[] {
   return blocks;
 }
 
+function splitBlackboardInlineFallback(text: string): ProcessedPair[] {
+  const markerPattern = /(?:^|\s)(?:Question|السؤال)\s*#?\s*(\d{1,4})\b/gi;
+  const matches = Array.from(text.matchAll(markerPattern));
+  if (matches.length < 2) return [];
+
+  return matches.map((match, idx) => {
+    const questionNumber = parseInt(match[1], 10);
+    const start = (match.index ?? 0) + match[0].length;
+    const end = idx + 1 < matches.length && matches[idx + 1].index !== undefined
+      ? matches[idx + 1].index
+      : text.length;
+    const block = compactText(text.slice(start, end));
+    const directiveAnswer = extractAnswerDirective(block);
+    const withoutDirective = removeAnswerDirectives(block);
+    const inline = splitInlineChoices(withoutDirective);
+    const trailingAnswer = extractTrailingAnswer(inline.questionText);
+    const questionText = trailingAnswer?.questionText ?? inline.questionText;
+    const answerText = resolveAnswerText(trailingAnswer?.answerText ?? directiveAnswer, inline.choices);
+
+    return {
+      questionNumber,
+      questionText,
+      choices: inline.choices,
+      selectedAnswer: answerText || null,
+      answerText,
+      pageNumber: 1,
+      confidence: answerText ? 0.76 : 0.52,
+      needsReview: !answerText,
+    };
+  });
+}
+
 function splitChoiceBlocksFallback(lines: string[]): ProcessedPair[] {
-  const optionPattern = /^([A-Da-d])[.)]\s+(.+)$/;
+  const optionPattern = /^([A-Ha-h])[.)]\s+(.+)$/;
   const answerPattern = /^Answer\s*[:\-]\s*(.+)$/i;
   const skipPatterns = [
     /^-- \d+ of \d+ --$/i,
@@ -548,10 +750,7 @@ function trimQuestionNoise(parts: string[]): string[] {
 }
 
 function resolveChoiceAnswer(answer: string | null, choices: string[]): string {
-  if (!answer) return "";
-  const letter = answer.match(/^[A-D]/i)?.[0]?.toUpperCase();
-  if (letter) return choices.find(choice => choice.startsWith(`${letter})`)) ?? answer;
-  return choices.find(choice => choice.replace(/^[A-D]\)\s*/, "").trim().toLowerCase() === answer.toLowerCase()) ?? answer;
+  return resolveAnswerText(answer, choices);
 }
 
 function finalize(cur: { num: number; parts: string[]; choices: string[]; selected: string | null; page: number }): ProcessedPair {
@@ -663,9 +862,11 @@ export async function processPdfFile(opts: {
       }
     }
 
+    const cleanedPairs = pairs.map(normalizeProcessedPair);
+
     // Deduplicate + sort
     const seen = new Set<string>();
-    const unique = pairs.filter(p => {
+    const unique = cleanedPairs.filter(p => {
       if (!p.questionText.trim() || p.questionText.length < 5) return false;
       const key = p.questionNumber + ":" + p.questionText.slice(0, 40);
       if (seen.has(key)) return false;
